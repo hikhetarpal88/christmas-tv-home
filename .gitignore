@@ -1,0 +1,8 @@
+build/
+dist/
+clips/
+*.apk
+*.mp4
+*.local.json
+.tv-*
+__pycache__/

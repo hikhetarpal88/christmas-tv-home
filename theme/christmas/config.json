@@ -1,0 +1,276 @@
+{
+  "festival": "christmas",
+  "festival_until": "2027-01-01",
+  "accent_color": "#FFD27F",
+  "background_color": "#070D1B",
+  "festival_tree_from": "2026-11-29",
+  "festival_decor": [
+    "sky",
+    "snow",
+    "lights",
+    "tree",
+    "gnome",
+    "snowcaps",
+    "weather",
+    "moments"
+  ],
+  "festival_days": {
+    "2026-11-14": "41 sleeps to Christmas",
+    "2026-11-15": "40 sleeps to Christmas",
+    "2026-11-16": "39 sleeps to Christmas",
+    "2026-11-17": "38 sleeps to Christmas",
+    "2026-11-18": "37 sleeps to Christmas",
+    "2026-11-19": "36 sleeps to Christmas",
+    "2026-11-20": "35 sleeps to Christmas",
+    "2026-11-21": "34 sleeps to Christmas",
+    "2026-11-22": "33 sleeps to Christmas",
+    "2026-11-23": "32 sleeps to Christmas",
+    "2026-11-24": "31 sleeps to Christmas",
+    "2026-11-25": "30 sleeps to Christmas",
+    "2026-11-26": "29 sleeps to Christmas",
+    "2026-11-27": "28 sleeps to Christmas",
+    "2026-11-28": "27 sleeps to Christmas",
+    "2026-11-29": "Advent begins · 26 sleeps to go",
+    "2026-11-30": "25 sleeps to Christmas",
+    "2026-12-01": "24 sleeps to Christmas",
+    "2026-12-02": "23 sleeps to Christmas",
+    "2026-12-03": "22 sleeps to Christmas",
+    "2026-12-04": "21 sleeps to Christmas",
+    "2026-12-05": "20 sleeps to Christmas",
+    "2026-12-06": "19 sleeps to Christmas",
+    "2026-12-07": "18 sleeps to Christmas",
+    "2026-12-08": "17 sleeps to Christmas",
+    "2026-12-09": "16 sleeps to Christmas",
+    "2026-12-10": "15 sleeps to Christmas",
+    "2026-12-11": "14 sleeps to Christmas",
+    "2026-12-12": "13 sleeps to Christmas",
+    "2026-12-13": "12 sleeps · Geminids tonight",
+    "2026-12-14": "11 sleeps · Geminids again tonight",
+    "2026-12-15": "10 sleeps to Christmas",
+    "2026-12-16": "9 sleeps to Christmas",
+    "2026-12-17": "8 sleeps to Christmas",
+    "2026-12-18": "7 sleeps · Ugly Sweater Day",
+    "2026-12-19": "6 sleeps to Christmas",
+    "2026-12-20": "5 sleeps to Christmas",
+    "2026-12-21": "4 sleeps · the longest night",
+    "2026-12-22": "3 sleeps to Christmas",
+    "2026-12-23": "Christmas Eve Eve · 2 sleeps",
+    "2026-12-24": "Christmas Eve",
+    "2026-12-25": "Merry Christmas",
+    "2026-12-26": "Happy Boxing Day",
+    "2026-12-27": "Happy Holidays · 5 days to 2027",
+    "2026-12-28": "Happy Holidays · 4 days to 2027",
+    "2026-12-29": "Happy Holidays · 3 days to 2027",
+    "2026-12-30": "Happy Holidays · 2 days to 2027",
+    "2026-12-31": "New Year's Eve · last day of 2026",
+    "2027-01-01": "Happy New Year"
+  },
+  "festival_calendar": {
+    "2026-11-14": {
+      "moment": "lights_on",
+      "line": "The lights are up."
+    },
+    "2026-11-15": {
+      "moment": "shooting_star"
+    },
+    "2026-11-16": {
+      "moment": "chase"
+    },
+    "2026-11-17": {
+      "moment": "snowflake"
+    },
+    "2026-11-18": {
+      "moment": "sleigh"
+    },
+    "2026-11-19": {
+      "moment": "cardinal"
+    },
+    "2026-11-20": {
+      "moment": "aurora"
+    },
+    "2026-11-21": {
+      "moment": "flurry"
+    },
+    "2026-11-22": {
+      "moment": "shooting_star"
+    },
+    "2026-11-23": {
+      "moment": "chase"
+    },
+    "2026-11-24": {
+      "moment": "sleigh",
+      "sky": "moon",
+      "line": "Full moon tonight."
+    },
+    "2026-11-25": {
+      "moment": "sleigh"
+    },
+    "2026-11-26": {
+      "moment": "cardinal"
+    },
+    "2026-11-27": {
+      "moment": "aurora"
+    },
+    "2026-11-28": {
+      "moment": "flurry"
+    },
+    "2026-11-29": {
+      "moment": "tree_arrives",
+      "line": "Advent Sunday: the tree is up on Home."
+    },
+    "2026-11-30": {
+      "moment": "chase"
+    },
+    "2026-12-01": {
+      "moment": "gnome_arrives",
+      "gnome": "tile:1",
+      "line": "A gnome has moved into Home. He hides somewhere new every day."
+    },
+    "2026-12-02": {
+      "moment": "sleigh",
+      "gnome": "pill:settings"
+    },
+    "2026-12-03": {
+      "moment": "cardinal",
+      "gnome": "date"
+    },
+    "2026-12-04": {
+      "moment": "aurora",
+      "gnome": "tile:3"
+    },
+    "2026-12-05": {
+      "moment": "flurry",
+      "gnome": "dock:left"
+    },
+    "2026-12-06": {
+      "moment": "shooting_star",
+      "gnome": "tree"
+    },
+    "2026-12-07": {
+      "moment": "chase",
+      "gnome": "pill:inputs"
+    },
+    "2026-12-08": {
+      "moment": "snowflake",
+      "gnome": "tile:0"
+    },
+    "2026-12-09": {
+      "moment": "sleigh",
+      "gnome": "dock:right"
+    },
+    "2026-12-10": {
+      "moment": "cardinal",
+      "gnome": "date"
+    },
+    "2026-12-11": {
+      "moment": "aurora",
+      "gnome": "tile:2"
+    },
+    "2026-12-12": {
+      "moment": "flurry",
+      "gnome": "pill:wifi"
+    },
+    "2026-12-13": {
+      "moment": "shooting_star",
+      "gnome": "tree",
+      "sky": "meteors",
+      "line": "Tonight the Geminids peak: shooting stars after 9 pm."
+    },
+    "2026-12-14": {
+      "moment": "shooting_star",
+      "gnome": "tile:1",
+      "sky": "meteors",
+      "line": "More Geminids tonight. Before dawn is best."
+    },
+    "2026-12-15": {
+      "moment": "snowflake",
+      "gnome": "dock:left"
+    },
+    "2026-12-16": {
+      "moment": "sleigh",
+      "gnome": "pill:settings"
+    },
+    "2026-12-17": {
+      "moment": "cardinal",
+      "gnome": "date"
+    },
+    "2026-12-18": {
+      "moment": "chase",
+      "gnome": "tile:3",
+      "style": "sweater+multicolour",
+      "line": "Ugly Sweater Day. Wear the worst one you own."
+    },
+    "2026-12-19": {
+      "moment": "flurry",
+      "gnome": "dock:right"
+    },
+    "2026-12-20": {
+      "moment": "shooting_star",
+      "gnome": "tile:0"
+    },
+    "2026-12-21": {
+      "moment": "aurora",
+      "gnome": "pill:inputs",
+      "sky": "solstice",
+      "line": "The longest night of the year. Days get longer from tomorrow."
+    },
+    "2026-12-22": {
+      "moment": "snowflake",
+      "gnome": "tile:2"
+    },
+    "2026-12-23": {
+      "moment": "sleigh",
+      "gnome": "date",
+      "sky": "moon",
+      "line": "The moon is full tonight."
+    },
+    "2026-12-24": {
+      "moment": "star+sleigh",
+      "gnome": "tree",
+      "sky": "moon",
+      "style": "santa+multicolour",
+      "line": "Santa sets off tonight."
+    },
+    "2026-12-25": {
+      "moment": "presents+flurry",
+      "gnome": "tree",
+      "style": "multicolour"
+    },
+    "2026-12-26": {
+      "moment": "chase",
+      "gnome": "tile:0",
+      "style": "holiday"
+    },
+    "2026-12-27": {
+      "moment": "shooting_star",
+      "gnome": "tile:2",
+      "style": "holiday"
+    },
+    "2026-12-28": {
+      "moment": "chase",
+      "gnome": "tree",
+      "style": "holiday"
+    },
+    "2026-12-29": {
+      "moment": "snowflake",
+      "gnome": "tile:3",
+      "style": "holiday"
+    },
+    "2026-12-30": {
+      "moment": "sleigh",
+      "gnome": "tile:1",
+      "style": "holiday"
+    },
+    "2026-12-31": {
+      "moment": "chase",
+      "gnome": "date",
+      "style": "holiday+multicolour",
+      "line": "See you in 2027!"
+    },
+    "2027-01-01": {
+      "moment": "fireworks",
+      "gnome": "tree",
+      "style": "holiday+multicolour"
+    }
+  }
+}

@@ -1,0 +1,617 @@
+diff --git a/launcher/app/src/main/AndroidManifest.xml b/launcher/app/src/main/AndroidManifest.xml
+index 701b5fe..62feb44 100644
+--- a/launcher/app/src/main/AndroidManifest.xml
++++ b/launcher/app/src/main/AndroidManifest.xml
+@@ -245,5 +245,17 @@
+                 android:name="android.accessibilityservice"
+                 android:resource="@xml/input_key_service" />
+         </service>
++        <!-- The Christmas screensaver. Pick it with:
++             adb shell settings put secure screensaver_components com.gathin.tvhome/.HolidayDream -->
++        <service
++            android:name=".HolidayDream"
++            android:label="@string/holiday_dream_name"
++            android:exported="true"
++            android:permission="android.permission.BIND_DREAM_SERVICE">
++            <intent-filter>
++                <action android:name="android.service.dreams.DreamService" />
++                <category android:name="android.intent.category.DEFAULT" />
++            </intent-filter>
++        </service>
+     </application>
+ </manifest>
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+index 84fc2f9..e771c7a 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+@@ -57,16 +57,20 @@ final class Festival {
+      */
+     final String signature;
+ 
+-    /** One day of festival_calendar. Unknown names are ignored by whoever reads them; "" means none. */
++    /**
++     * One day of festival_calendar. Unknown names are ignored by whoever reads them; "" means none. line is a
++     * sentence for the Christmas screensaver (HolidayDream), under the greeting.
++     */
+     static final class Day {
+-        static final Day NONE = new Day("", "", "", "");
+-        final String moment, gnome, sky, style;
++        static final Day NONE = new Day("", "", "", "", "");
++        final String moment, gnome, sky, style, line;
+ 
+-        Day(String moment, String gnome, String sky, String style) {
++        Day(String moment, String gnome, String sky, String style, String line) {
+             this.moment = moment;
+             this.gnome = gnome;
+             this.sky = sky;
+             this.style = style;
++            this.line = line;
+         }
+     }
+ 
+@@ -159,7 +163,7 @@ final class Festival {
+                 if (o == null) continue;
+                 try {
+                     plan.put(LocalDate.parse(key.trim()), new Day(word(o, "moment"), word(o, "gnome"), word(o, "sky"),
+-                            word(o, "style")));
++                            word(o, "style"), sentence(o, "line")));
+                 } catch (DateTimeParseException ignored) {
+                     // left out
+                 }
+@@ -180,6 +184,12 @@ final class Festival {
+         return s.length() <= 40 && s.matches("[a-z0-9:_.@+-]*") ? s : "";
+     }
+ 
++    /** Plain text from a calendar entry: one line, at most 80 characters. */
++    private static String sentence(JSONObject o, String key) {
++        String s = o.optString(key, "").replaceAll("[\\p{Cntrl}]", " ").replaceAll("\\s+", " ").trim();
++        return s.length() <= 80 ? s : s.substring(0, 80).trim();
++    }
++
+     private static LocalDate date(String s) {
+         if (s == null || s.trim().isEmpty()) return null;
+         try {
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/HolidayDream.java b/launcher/app/src/main/java/com/gathin/tvhome/HolidayDream.java
+new file mode 100644
+index 0000000..18ce458
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/HolidayDream.java
+@@ -0,0 +1,346 @@
++package com.gathin.tvhome;
++
++import android.graphics.Canvas;
++import android.graphics.ColorFilter;
++import android.graphics.Paint;
++import android.graphics.PixelFormat;
++import android.graphics.RadialGradient;
++import android.graphics.Rect;
++import android.graphics.Shader;
++import android.graphics.SurfaceTexture;
++import android.graphics.drawable.Drawable;
++import android.media.MediaPlayer;
++import android.os.Handler;
++import android.os.Looper;
++import android.provider.Settings;
++import android.service.dreams.DreamService;
++import android.view.Surface;
++import android.view.TextureView;
++import android.view.View;
++import android.widget.TextClock;
++import android.widget.TextView;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++
++import java.io.File;
++import java.time.Instant;
++import java.time.LocalDate;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++/**
++ * bravia: the Christmas screensaver. Plays the clips in TV Home's own media folder
++ * (Android/data/com.gathin.tvhome/files/holiday, written through ThemeProvider or pushed over adb), silent, each loop
++ * dissolving into the next so the seam never shows. A clip whose name has "fireplace" in it is the main scene: it
++ * comes back between each of the others and stays longer. Over it, in Home's type: the season's greeting
++ * (the countdown, or the Santa tracker on Christmas Eve), the day's line from festival_calendar, the time, and the
++ * date with Home Assistant's weather. Outside a christmas festival it shows just the scenes, the time and the date.
++ *
++ * Two TextureViews with a MediaPlayer each; the next loop is prepared on the hidden one and faded in over the
++ * playing one. Nothing else moves, so it costs one hardware video decode (two during a dissolve).
++ */
++public class HolidayDream extends DreamService {
++    private static final long FADE_MS = 1600;
++    private static final long MAIN_HOLD_MS = 4 * 60_000L, OTHER_HOLD_MS = 90_000L;
++    private static final String WEATHER_KEY = "bravia_weather";
++    private static final long WEATHER_MAX_AGE_S = 3 * 3600;
++
++    private final Handler handler = new Handler(Looper.getMainLooper());
++    private final TextureView[] views = new TextureView[2];
++    private final Surface[] surfaces = new Surface[2];
++    private final MediaPlayer[] players = new MediaPlayer[2];
++    private int front;
++    private final List<File> playlist = new ArrayList<>();
++    private int scene;
++    private long sceneUntil;
++    private boolean dreaming, started;
++    private Festival festival = Festival.NONE;
++    private TextView greeting, line;
++    private TextClock date;
++    private CharSequence dateFormat12, dateFormat24;
++
++    private final Runnable nextLoop = () -> playOn(1 - front, pick(), true);
++    private final Runnable minute = new Runnable() {
++        @Override
++        public void run() {
++            updateText();
++            handler.postDelayed(this, 60_000L);
++        }
++    };
++
++    @Override
++    public void onAttachedToWindow() {
++        super.onAttachedToWindow();
++        setInteractive(false);
++        setFullscreen(true);
++        setScreenBright(true);
++        setContentView(R.layout.dream_holiday);
++        views[0] = findViewById(R.id.holidayVideoA);
++        views[1] = findViewById(R.id.holidayVideoB);
++        for (int i = 0; i < 2; i++) {
++            final int slot = i;
++            views[i].setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
++                @Override
++                public void onSurfaceTextureAvailable(@NonNull SurfaceTexture st, int w, int h) {
++                    surfaces[slot] = new Surface(st);
++                    maybeStart();
++                }
++
++                @Override
++                public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture st, int w, int h) {
++                }
++
++                @Override
++                public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture st) {
++                    release(slot);
++                    if (surfaces[slot] != null) surfaces[slot].release();
++                    surfaces[slot] = null;
++                    return true;
++                }
++
++                @Override
++                public void onSurfaceTextureUpdated(@NonNull SurfaceTexture st) {
++                }
++            });
++        }
++        findViewById(R.id.holidayShade).setBackground(new CornerShade());
++        greeting = findViewById(R.id.holidayGreeting);
++        line = findViewById(R.id.holidayLine);
++        date = findViewById(R.id.holidayDate);
++        String format = getString(R.string.date_format);
++        dateFormat12 = format;
++        dateFormat24 = format;
++        try {
++            festival = Config.load(this).festival;
++        } catch (RuntimeException e) {
++            festival = Festival.NONE;   // the scenes and the clock still show
++        }
++        buildPlaylist();
++        updateText();
++    }
++
++    @Override
++    public void onDreamingStarted() {
++        super.onDreamingStarted();
++        dreaming = true;
++        handler.post(minute);
++        maybeStart();
++    }
++
++    @Override
++    public void onDreamingStopped() {
++        dreaming = false;
++        handler.removeCallbacksAndMessages(null);
++        release(0);
++        release(1);
++        super.onDreamingStopped();
++    }
++
++    @Override
++    public void onDetachedFromWindow() {
++        handler.removeCallbacksAndMessages(null);
++        release(0);
++        release(1);
++        super.onDetachedFromWindow();
++    }
++
++    // ---- scenes -------------------------------------------------------------------------------------
++
++    /** The main scene (a fireplace) between each of the others: main, a, main, b, main, c... */
++    private void buildPlaylist() {
++        playlist.clear();
++        File dir = getExternalFilesDir("holiday");
++        File[] files = dir == null ? null : dir.listFiles((d, name) -> {
++            String n = name.toLowerCase();
++            return n.endsWith(".mp4") || n.endsWith(".m4v") || n.endsWith(".mov") || n.endsWith(".mkv");
++        });
++        if (files == null || files.length == 0) return;
++        Arrays.sort(files);
++        File main = null;
++        List<File> others = new ArrayList<>();
++        for (File f : files) {
++            if (main == null && f.getName().toLowerCase().contains("fireplace")) main = f;
++            else others.add(f);
++        }
++        if (main == null) {
++            playlist.addAll(others);
++            return;
++        }
++        if (others.isEmpty()) playlist.add(main);
++        for (File o : others) {
++            playlist.add(main);
++            playlist.add(o);
++        }
++    }
++
++    private boolean isMain(File f) {
++        return f.getName().toLowerCase().contains("fireplace");
++    }
++
++    /** The clip for the next loop: the same scene until its time is up, then the next one. */
++    private File pick() {
++        long now = System.currentTimeMillis();
++        if (sceneUntil == 0) {
++            sceneUntil = now + (isMain(playlist.get(scene)) ? MAIN_HOLD_MS : OTHER_HOLD_MS);
++        } else if (now >= sceneUntil) {
++            scene = (scene + 1) % playlist.size();
++            sceneUntil = now + (isMain(playlist.get(scene)) ? MAIN_HOLD_MS : OTHER_HOLD_MS);
++        }
++        return playlist.get(scene);
++    }
++
++    private void maybeStart() {
++        if (!dreaming || started || surfaces[0] == null || surfaces[1] == null) return;
++        started = true;
++        if (playlist.isEmpty()) return;   // no clips yet: the text on black
++        playOn(front, pick(), false);
++    }
++
++    /** Plays file on a slot; with fadeIn it dissolves over the slot that was playing, which then stops. */
++    private void playOn(int slot, File file, boolean fadeIn) {
++        if (!dreaming || surfaces[slot] == null) return;
++        release(slot);
++        MediaPlayer mp = new MediaPlayer();
++        players[slot] = mp;
++        try {
++            mp.setSurface(surfaces[slot]);
++            mp.setVolume(0f, 0f);
++            mp.setDataSource(file.getPath());
++        } catch (Exception e) {
++            skip(slot);
++            return;
++        }
++        mp.setOnPreparedListener(p -> {
++            if (players[slot] != p || !dreaming) return;
++            p.start();
++            int old = 1 - slot;
++            if (fadeIn) {
++                views[slot].animate().alpha(1f).setDuration(FADE_MS).start();
++                views[old].animate().alpha(0f).setDuration(FADE_MS).withEndAction(() -> {
++                    if (front != old) release(old);
++                }).start();
++            } else {
++                views[slot].setAlpha(1f);
++                views[old].setAlpha(0f);
++            }
++            front = slot;
++            long duration = Math.max(4000, p.getDuration());
++            handler.removeCallbacks(nextLoop);
++            handler.postDelayed(nextLoop, Math.max(2500, duration - FADE_MS - 250));
++        });
++        mp.setOnErrorListener((p, what, extra) -> {
++            skip(slot);
++            return true;
++        });
++        mp.prepareAsync();
++    }
++
++    /** A clip that won't play: drop it and go on with the next (or stop trying once none is left). */
++    private void skip(int slot) {
++        release(slot);
++        if (playlist.isEmpty()) return;
++        File bad = playlist.get(scene);
++        playlist.removeIf(f -> f.equals(bad));
++        if (playlist.isEmpty()) return;
++        scene = scene % playlist.size();
++        sceneUntil = 0;
++        handler.post(() -> playOn(slot, pick(), front != slot));
++    }
++
++    private void release(int slot) {
++        MediaPlayer mp = players[slot];
++        players[slot] = null;
++        if (mp == null) return;
++        try {
++            mp.stop();
++        } catch (IllegalStateException ignored) {
++            // not started yet
++        }
++        mp.release();
++    }
++
++    // ---- text -------------------------------------------------------------------------------------
++
++    private void updateText() {
++        LocalDate today = festival.today();
++        boolean festive = festival.active(today) && "christmas".equals(festival.name);
++        String g = "", l = "";
++        if (festive) {
++            Festival.Day plan = festival.day(today);
++            g = festival.greetingText(getResources(), today);
++            for (String s : plan.style.split("\\+")) {
++                if (s.equals("santa")) g = HolidayDecor.santa(Instant.now());
++            }
++            l = plan.line;
++        }
++        greeting.setText(g);
++        greeting.setTextColor(liftTowardsWhite(festival.accentColor(), 0.25f));
++        greeting.setVisibility(g.isEmpty() ? View.GONE : View.VISIBLE);
++        line.setText(l);
++        line.setVisibility(l.isEmpty() ? View.GONE : View.VISIBLE);
++        String weather = weatherText();
++        String tail = weather == null ? "" : "  '·  " + weather.replace("'", "''") + "'";
++        date.setFormat12Hour(dateFormat12 + tail);
++        date.setFormat24Hour(dateFormat24 + tail);
++    }
++
++    /** Settings.Global bravia_weather ("<epoch>|12° RAIN", written over adb), when it's fresh. */
++    @Nullable
++    private String weatherText() {
++        String v = Settings.Global.getString(getContentResolver(), WEATHER_KEY);
++        int bar = v == null ? -1 : v.indexOf('|');
++        if (bar <= 0) return null;
++        try {
++            long age = System.currentTimeMillis() / 1000 - Long.parseLong(v.substring(0, bar).trim());
++            if (age > WEATHER_MAX_AGE_S) return null;
++        } catch (NumberFormatException e) {
++            return null;
++        }
++        String text = v.substring(bar + 1).trim();
++        return text.isEmpty() || text.length() > 32 ? null : text;
++    }
++
++    private static int liftTowardsWhite(int argb, float amount) {
++        int r = (argb >> 16) & 0xFF, g = (argb >> 8) & 0xFF, b = argb & 0xFF;
++        r += (int) ((255 - r) * amount);
++        g += (int) ((255 - g) * amount);
++        b += (int) ((255 - b) * amount);
++        return 0xFF000000 | (r << 16) | (g << 8) | b;
++    }
++
++    /** A soft dark pool in the bottom-left corner, so the text reads over firelight without a visible box. */
++    private static final class CornerShade extends Drawable {
++        private final Paint paint = new Paint();
++
++        @Override
++        protected void onBoundsChange(@NonNull Rect b) {
++            super.onBoundsChange(b);
++            float r = Math.max(b.width() * 0.62f, 1f);
++            paint.setShader(new RadialGradient(b.left, b.bottom, r,
++                    new int[]{0xB3000000, 0x73000000, 0x26000000, 0x00000000}, new float[]{0f, 0.4f, 0.72f, 1f},
++                    Shader.TileMode.CLAMP));
++        }
++
++        @Override
++        public void draw(@NonNull Canvas c) {
++            c.drawRect(getBounds(), paint);
++        }
++
++        @Override
++        public void setAlpha(int alpha) {
++            paint.setAlpha(alpha);
++        }
++
++        @Override
++        public void setColorFilter(@Nullable ColorFilter filter) {
++            paint.setColorFilter(filter);
++        }
++
++        @Override
++        public int getOpacity() {
++            return PixelFormat.TRANSLUCENT;
++        }
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/ThemeFiles.java b/launcher/app/src/main/java/com/gathin/tvhome/ThemeFiles.java
+index 18fded9..5eef4e7 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/ThemeFiles.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/ThemeFiles.java
+@@ -6,9 +6,14 @@ import java.util.regex.Pattern;
+ /** The files ThemeProvider may write or delete under Config.dir, by the URI's path segments. */
+ final class ThemeFiles {
+     static final String WALLPAPERS = "wallpapers";
++    /** The Christmas screensaver's clips (HolidayDream reads this folder). */
++    static final String HOLIDAY = "holiday";
+     /** The names tools/theme.sh accepts for a collection image, and the types WallpaperRotation reads. */
+     private static final Pattern IMAGE = Pattern.compile("[A-Za-z0-9_.-]+\\.(jpg|jpeg|png|webp)",
+             Pattern.CASE_INSENSITIVE);
++    /** The video types HolidayDream plays. */
++    private static final Pattern CLIP = Pattern.compile("[A-Za-z0-9_.-]+\\.(mp4|m4v|mov|mkv)",
++            Pattern.CASE_INSENSITIVE);
+ 
+     private ThemeFiles() {}
+ 
+@@ -24,9 +29,23 @@ final class ThemeFiles {
+                 && (collectionImage(segments.get(1)) || WallpaperCaptions.FILE_NAME.equals(segments.get(1)))) {
+             return WALLPAPERS + "/" + segments.get(1);
+         }
++        // Clips go in this way rather than with adb push: on Android 14 a file the shell creates under
++        // Android/data belongs to the shell, and the launcher can't open it.
++        if (segments.size() == 2 && HOLIDAY.equals(segments.get(0)) && holidayClip(segments.get(1))) {
++            return HOLIDAY + "/" + segments.get(1);
++        }
+         return null;
+     }
+ 
++    /** True for "holiday" alone: a delete of it removes every clip. */
++    static boolean isClips(List<String> segments) {
++        return segments != null && segments.size() == 1 && HOLIDAY.equals(segments.get(0));
++    }
++
++    static boolean holidayClip(String name) {
++        return name != null && !name.startsWith(".") && CLIP.matcher(name).matches();
++    }
++
+     /** True for "wallpapers" alone: a delete of it clears the collection's images. */
+     static boolean isCollection(List<String> segments) {
+         return segments != null && segments.size() == 1 && WALLPAPERS.equals(segments.get(0));
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/ThemeProvider.java b/launcher/app/src/main/java/com/gathin/tvhome/ThemeProvider.java
+index 183f9c1..d885277 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/ThemeProvider.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/ThemeProvider.java
+@@ -18,6 +18,8 @@ import java.io.FileNotFoundException;
+  *   content write --uri content://com.gathin.tvhome.theme/wallpapers/dusk.jpg < /data/local/tmp/dusk.jpg
+  *   content delete --uri content://com.gathin.tvhome.theme/config.json
+  *   content delete --uri content://com.gathin.tvhome.theme/wallpapers      (every image in the collection)
++ *   content write --uri content://com.gathin.tvhome.theme/holiday/fireplace.mp4 < /data/local/tmp/fireplace.mp4
++ *   content delete --uri content://com.gathin.tvhome.theme/holiday         (every screensaver clip)
+  */
+ public class ThemeProvider extends ContentProvider {
+ 
+@@ -50,6 +52,12 @@ public class ThemeProvider extends ContentProvider {
+             if (images != null) for (File f : images) if (f.delete()) n++;
+             return n;
+         }
++        if (dir != null && ThemeFiles.isClips(uri.getPathSegments())) {
++            File[] clips = new File(dir, ThemeFiles.HOLIDAY).listFiles((d, name) -> ThemeFiles.holidayClip(name));
++            int n = 0;
++            if (clips != null) for (File f : clips) if (f.delete()) n++;
++            return n;
++        }
+         try {
+             return file(uri).delete() ? 1 : 0;
+         } catch (FileNotFoundException e) {
+diff --git a/launcher/app/src/main/res/layout/dream_holiday.xml b/launcher/app/src/main/res/layout/dream_holiday.xml
+new file mode 100644
+index 0000000..b1b4492
+--- /dev/null
++++ b/launcher/app/src/main/res/layout/dream_holiday.xml
+@@ -0,0 +1,105 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- bravia: the Christmas screensaver (HolidayDream). Two video layers that crossfade, a soft shade in the
++     bottom-left corner, and Home's own type for the greeting, the day's line, the time and the date. -->
++<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
++    android:layout_width="match_parent"
++    android:layout_height="match_parent"
++    android:background="#FF000000">
++
++    <TextureView
++        android:id="@+id/holidayVideoA"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent" />
++
++    <TextureView
++        android:id="@+id/holidayVideoB"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent"
++        android:alpha="0" />
++
++    <View
++        android:id="@+id/holidayShade"
++        android:layout_width="match_parent"
++        android:layout_height="match_parent" />
++
++    <LinearLayout
++        android:id="@+id/holidayText"
++        android:layout_width="wrap_content"
++        android:layout_height="wrap_content"
++        android:layout_gravity="bottom|start"
++        android:layout_marginStart="72dp"
++        android:layout_marginBottom="52dp"
++        android:orientation="vertical">
++
++        <TextView
++            android:id="@+id/holidayGreeting"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:fontFamily="@string/font_medium"
++            android:letterSpacing="0.22"
++            android:shadowColor="#99000000"
++            android:shadowRadius="8"
++            android:textAllCaps="true"
++            android:textSize="14sp" />
++
++        <TextView
++            android:id="@+id/holidayLine"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="6dp"
++            android:fontFamily="@string/font_light"
++            android:maxWidth="560dp"
++            android:shadowColor="#99000000"
++            android:shadowRadius="8"
++            android:textColor="#E6FFFFFF"
++            android:textSize="18sp" />
++
++        <LinearLayout
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:layout_marginTop="6dp"
++            android:baselineAligned="true"
++            android:orientation="horizontal">
++
++            <TextClock
++                android:id="@+id/holidayClock"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:fontFamily="@string/font_light"
++                android:format12Hour="h:mm"
++                android:format24Hour="H:mm"
++                android:letterSpacing="-0.03"
++                android:shadowColor="#99000000"
++                android:shadowRadius="10"
++                android:textColor="#FFFFFFFF"
++                android:textSize="64sp" />
++
++            <TextClock
++                android:id="@+id/holidayAmPm"
++                android:layout_width="wrap_content"
++                android:layout_height="wrap_content"
++                android:layout_marginStart="10dp"
++                android:fontFamily="@string/font_regular"
++                android:format12Hour="a"
++                android:format24Hour=""
++                android:letterSpacing="0.1"
++                android:shadowColor="#99000000"
++                android:shadowRadius="8"
++                android:textAllCaps="true"
++                android:textColor="#CCFFFFFF"
++                android:textSize="16sp" />
++        </LinearLayout>
++
++        <TextClock
++            android:id="@+id/holidayDate"
++            android:layout_width="wrap_content"
++            android:layout_height="wrap_content"
++            android:fontFamily="@string/font_regular"
++            android:letterSpacing="0.14"
++            android:shadowColor="#99000000"
++            android:shadowRadius="8"
++            android:textAllCaps="true"
++            android:textColor="#B3FFFFFF"
++            android:textSize="13sp" />
++    </LinearLayout>
++</FrameLayout>
+diff --git a/launcher/app/src/main/res/values/bravia_strings.xml b/launcher/app/src/main/res/values/bravia_strings.xml
+new file mode 100644
+index 0000000..76c080f
+--- /dev/null
++++ b/launcher/app/src/main/res/values/bravia_strings.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- bravia: strings for the local patches. -->
++<resources>
++    <!-- The Christmas screensaver's name in the TV's screensaver list. -->
++    <string name="holiday_dream_name" translatable="false">Christmas</string>
++</resources>

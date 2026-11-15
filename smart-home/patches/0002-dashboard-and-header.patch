@@ -1,0 +1,1773 @@
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
+index e91c324..65ad2d3 100644
+--- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
+@@ -26,16 +26,32 @@ final class Config {
+     final List<String> glance;
+     /** Entity id patterns to leave off the list, "*" matching anything (e.g. "light.*_segment_*"). */
+     final List<String> exclude;
++    /** The pushed config's "summary" object, as JSON text: doorbell, temperature, extras (see Summary). */
++    final String summary;
+ 
+     Config(String url, String token, List<String> glance) {
+         this(url, token, glance, null);
+     }
+ 
+     Config(String url, String token, List<String> glance, List<String> exclude) {
++        this(url, token, glance, exclude, "");
++    }
++
++    Config(String url, String token, List<String> glance, List<String> exclude, String summary) {
+         this.url = url;
+         this.token = token;
+         this.glance = Collections.unmodifiableList(glance == null ? Collections.emptyList() : glance);
+         this.exclude = Collections.unmodifiableList(exclude == null ? Collections.emptyList() : exclude);
++        this.summary = summary == null ? "" : summary;
++    }
++
++    /** The summary settings; empty when none were pushed or they don't parse. */
++    org.json.JSONObject summarySettings() {
++        try {
++            return summary.isEmpty() ? new org.json.JSONObject() : new org.json.JSONObject(summary);
++        } catch (org.json.JSONException e) {
++            return new org.json.JSONObject();
++        }
+     }
+ 
+     boolean complete() {
+@@ -49,7 +65,7 @@ final class Config {
+     static Config load(Context c) {
+         SharedPreferences p = prefs(c);
+         return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")),
+-                readGlance(p.getString("exclude", "")));
++                readGlance(p.getString("exclude", "")), p.getString("summary", ""));
+     }
+ 
+     static void saveUrl(Context c, String url) {
+@@ -68,6 +84,10 @@ final class Config {
+         prefs(c).edit().putString("exclude", joinGlance(patterns)).apply();
+     }
+ 
++    static void saveSummary(Context c, String json) {
++        prefs(c).edit().putString("summary", json == null ? "" : json).apply();
++    }
++
+     /** Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...]}) if there is one, and deletes it. */
+     static boolean importPushed(Context c) {
+         File dir = c.getExternalFilesDir(null);
+@@ -79,6 +99,10 @@ final class Config {
+             if (o.has("token")) saveToken(c, o.optString("token"));
+             if (o.has("glance")) saveGlance(c, parseGlance(o.opt("glance")));
+             if (o.has("exclude")) saveExclude(c, parseGlance(o.opt("exclude")));
++            if (o.has("summary")) {
++                JSONObject summary = o.optJSONObject("summary");
++                saveSummary(c, summary == null ? "" : summary.toString());
++            }
+             return true;
+         } catch (Exception e) {
+             return false;
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
+index 038f200..32706d2 100644
+--- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
+@@ -2,42 +2,68 @@ package io.github.maxhayim.smarthome;
+ 
+ import android.app.Activity;
+ import android.app.AlertDialog;
++import android.content.res.ColorStateList;
++import android.graphics.Typeface;
++import android.graphics.drawable.GradientDrawable;
+ import android.os.Bundle;
+ import android.os.Handler;
+ import android.os.Looper;
+ import android.text.InputType;
++import android.util.TypedValue;
+ import android.view.Gravity;
++import android.view.KeyEvent;
+ import android.view.View;
+ import android.view.ViewGroup;
+ import android.widget.EditText;
++import android.widget.FrameLayout;
+ import android.widget.ImageView;
+ import android.widget.LinearLayout;
+ import android.widget.ScrollView;
+ import android.widget.TextView;
+ 
++import org.json.JSONArray;
+ import org.json.JSONException;
+ 
++import java.time.ZoneId;
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Locale;
++import java.util.Map;
+ import java.util.concurrent.ExecutorService;
+ import java.util.concurrent.Executors;
+ 
+ /**
+- * The tile and module card open this: a glance of weather and fuel prices at the top, then your Home
+- * Assistant's scenes, lights and switches, climate, sensors, doors and windows, and locks. OK runs a
+- * scene or switches a light; Left and Right dim a light or move a thermostat. Locks are shown, never
+- * opened. It reads Home Assistant only while this screen is open.
++ * The Home dashboard (bravia's redesign of the add-on's list): a header with the weather and who's home, then
++ * scenes as pills and lights and devices as tiles, in the manner of Apple's Home app. OK runs a scene or switches
++ * a tile; holding OK on a light (or thermostat) lets Left and Right dim it (or set it), OK again when done. Locks,
++ * doors and sensors are shown, never operated. It reads Home Assistant only while this screen is open.
+  */
+ public class MainActivity extends Activity {
+     private static final long REFRESH_MS = 10_000;
++    private static final int COLUMNS = 6;
++    private static final int SCENE_COLUMNS = 4;
+ 
+     private final Handler main = new Handler(Looper.getMainLooper());
+     private final ExecutorService net = Executors.newSingleThreadExecutor();
+-    private LinearLayout rows;
++    private final Map<String, Tile> tiles = new HashMap<>();
++    private LinearLayout content;
+     private TextView status;
++    private ImageView weatherIcon;
++    private TextView weatherText;
++    private TextView peopleText;
++    private ImageView peopleIcon;
+     private Config config;
+     private List<Ha.Entity> entities = new ArrayList<>();
++    private List<Summary.Person> people = new ArrayList<>();
++    private String doorRang;
+     private String problem;
++    private String layoutKey = "";
++    private Typeface medium;
++    /** The light or thermostat Left and Right are adjusting, after a long press on OK; null otherwise. */
++    private Ha.Entity adjusting;
++    private int adjustLevel;
++    private boolean swallowOkUp;
+     private final Runnable refresh = new Runnable() {
+         @Override
+         public void run() {
+@@ -49,26 +75,60 @@ public class MainActivity extends Activity {
+     @Override
+     protected void onCreate(Bundle savedInstanceState) {
+         super.onCreate(savedInstanceState);
+-        LinearLayout page = new LinearLayout(this);
+-        page.setOrientation(LinearLayout.VERTICAL);
+-        page.setBackgroundColor(0xFF0D1117);
+-        page.setPadding(px(48), px(32), px(48), px(24));
+-        TextView title = new TextView(this);
+-        title.setText(R.string.app_name);
+-        title.setTextSize(28);
+-        title.setTextColor(0xFFFFFFFF);
+-        status = new TextView(this);
+-        status.setTextSize(15);
+-        status.setTextColor(0xFF8B949E);
+-        status.setPadding(0, 0, 0, px(16));
+-        page.addView(title);
+-        page.addView(status);
++        medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
++        FrameLayout root = new FrameLayout(this);
++        root.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
++                new int[] {0xFF17181D, 0xFF0B0C0F}));
++
+         ScrollView scroll = new ScrollView(this);
+-        rows = new LinearLayout(this);
+-        rows.setOrientation(LinearLayout.VERTICAL);
+-        scroll.addView(rows);
+-        page.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+-        setContentView(page);
++        scroll.setFillViewport(true);
++        scroll.setClipToPadding(false);
++        scroll.setClipChildren(false);
++        scroll.setVerticalScrollBarEnabled(false);
++        scroll.setPadding(0, px(36), 0, px(56));
++        LinearLayout column = new LinearLayout(this);
++        column.setOrientation(LinearLayout.VERTICAL);
++        column.setClipChildren(false);
++        column.setClipToPadding(false);   // a focused tile's lift reaches into the side margins
++        column.setPadding(px(56), 0, px(56), 0);
++
++        LinearLayout header = new LinearLayout(this);
++        header.setOrientation(LinearLayout.HORIZONTAL);
++        header.setGravity(Gravity.CENTER_VERTICAL);
++        TextView title = text("Home", 34, 0xFFFFFFFF, true);
++        header.addView(title);
++        weatherIcon = new ImageView(this);
++        LinearLayout.LayoutParams wi = new LinearLayout.LayoutParams(px(30), px(30));
++        wi.setMarginStart(px(26));
++        header.addView(weatherIcon, wi);
++        weatherText = text("", 18, 0xB3FFFFFF, false);
++        LinearLayout.LayoutParams wt = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
++                LinearLayout.LayoutParams.WRAP_CONTENT);
++        wt.setMarginStart(px(10));
++        header.addView(weatherText, wt);
++        header.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
++        peopleIcon = new ImageView(this);
++        peopleIcon.setImageResource(R.drawable.ic_home);
++        peopleIcon.setImageTintList(ColorStateList.valueOf(0xB3FFFFFF));
++        header.addView(peopleIcon, new LinearLayout.LayoutParams(px(22), px(22)));
++        peopleText = text("", 17, 0xCCFFFFFF, false);
++        LinearLayout.LayoutParams pt = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
++                LinearLayout.LayoutParams.WRAP_CONTENT);
++        pt.setMarginStart(px(10));
++        header.addView(peopleText, pt);
++        column.addView(header);
++
++        status = text("", 15, 0xFFFF9F0A, false);
++        status.setPadding(0, px(10), 0, 0);
++        column.addView(status);
++
++        content = new LinearLayout(this);
++        content.setOrientation(LinearLayout.VERTICAL);
++        content.setClipChildren(false);
++        column.addView(content);
++        scroll.addView(column);
++        root.addView(scroll);
++        setContentView(root);
+     }
+ 
+     @Override
+@@ -76,13 +136,15 @@ public class MainActivity extends Activity {
+         super.onResume();
+         Config.importPushed(this);
+         config = Config.load(this);
+-        build();
++        layoutKey = "";
++        render();
+         if (config.complete()) main.post(refresh);
+     }
+ 
+     @Override
+     protected void onPause() {
+         main.removeCallbacks(refresh);
++        endAdjust();
+         super.onPause();
+     }
+ 
+@@ -97,10 +159,16 @@ public class MainActivity extends Activity {
+         net.execute(() -> {
+             HaClient.Reply r = new HaClient(c.url, c.token).get("/api/states");
+             List<Ha.Entity> found = null;
++            List<Summary.Person> who = null;
++            String door = null;
+             String why = null;
+             if (r.ok()) {
+                 try {
+                     found = Ha.parse(r.body, c.glance, c.exclude);
++                    JSONArray states = new JSONArray(r.body);
++                    who = Summary.people(states);
++                    door = Summary.doorRang(states, c, System.currentTimeMillis(), ZoneId.systemDefault(),
++                            Locale.getDefault());
+                 } catch (JSONException e) {
+                     why = "Home Assistant's answer couldn't be read.";
+                 }
+@@ -108,12 +176,16 @@ public class MainActivity extends Activity {
+                 why = Ha.problem(r.code);
+             }
+             List<Ha.Entity> f = found;
+-            String w = why;
++            List<Summary.Person> w = who;
++            String d = door;
++            String y = why;
+             main.post(() -> {
+                 if (isFinishing()) return;
+-                problem = w;
++                problem = y;
+                 if (f != null) entities = f;
+-                build();
++                if (w != null) people = w;
++                if (f != null) doorRang = d;
++                render();
+             });
+         });
+     }
+@@ -130,92 +202,364 @@ public class MainActivity extends Activity {
+         });
+     }
+ 
+-    /** Rebuilds the list; focus stays on the row it was on. */
+-    private void build() {
+-        int focused = rows.indexOfChild(rows.getFocusedChild());
+-        rows.removeAllViews();
++    // ---- drawing ------------------------------------------------------------------------------------
++
++    /** Header and tiles: tiles are rebuilt only when the set of entities changes, else updated in place. */
++    private void render() {
+         if (!config.complete()) {
+             status.setText("Add your Home Assistant's address and a long-lived access token (your profile page in"
+                     + " Home Assistant, under Security).");
+         } else if (problem != null) {
+             status.setText(problem);
++        } else if (adjusting == null) {
++            status.setText(entities.isEmpty() ? "Reading Home Assistant…" : "");
++        }
++        status.setVisibility(status.getText().length() == 0 ? View.GONE : View.VISIBLE);
++        renderHeader();
++
++        List<List<Ha.Entity>> sections = sections();
++        StringBuilder key = new StringBuilder(config.complete() ? "c" : "-");
++        for (List<Ha.Entity> s : sections) {
++            key.append('|');
++            for (Ha.Entity e : s) key.append(e.id).append(',');
++        }
++        key.append(doorRang == null ? "|nodoor" : "|door");
++        if (key.toString().equals(layoutKey)) {
++            for (List<Ha.Entity> s : sections) for (Ha.Entity e : s) bindTile(e);
++            bindDoor();
++            return;
++        }
++        layoutKey = key.toString();
++        rebuild(sections);
++    }
++
++    private void renderHeader() {
++        Ha.Glance g = Ha.glance(entities, config.glance);
++        if (g.weather != null && g.weather.available() && !Double.isNaN(g.weather.current)) {
++            weatherIcon.setImageResource(weatherDrawable(g.icon));
++            weatherIcon.setVisibility(View.VISIBLE);
++            StringBuilder w = new StringBuilder(Ha.number(g.weather.current)).append("°  ").append(condition(g.icon));
++            for (Ha.Entity p : g.prices) w.append("   ").append(p.name).append(' ').append(p.value());
++            weatherText.setText(w.toString());
+         } else {
+-            status.setText(entities.isEmpty() ? "Reading Home Assistant…" : "Connected to " + config.url + ".");
++            weatherIcon.setVisibility(View.GONE);
++            weatherText.setText("");
+         }
+-        addGlance(Ha.glance(entities, config.glance));
+-        Ha.Kind section = null;
++        String who = Summary.headline(people);
++        peopleText.setText(who);
++        peopleIcon.setVisibility(who.isEmpty() ? View.GONE : View.VISIBLE);
++    }
++
++    /** Scenes, lights, devices, climate, sensors: each a list in the order it's drawn. */
++    private List<List<Ha.Entity>> sections() {
++        List<Ha.Entity> scenes = new ArrayList<>(), lights = new ArrayList<>(), devices = new ArrayList<>(),
++                climate = new ArrayList<>(), sensors = new ArrayList<>();
+         for (Ha.Entity e : entities) {
+             if (!Ha.inList(e)) continue;
+-            if (e.kind != section) {
+-                section = e.kind;
+-                heading(Ha.section(section));
++            switch (e.kind) {
++                case SCENE: scenes.add(e); break;
++                case TOGGLE: (e.domain().equals("light") ? lights : devices).add(e); break;
++                case CLIMATE: climate.add(e); break;
++                default: sensors.add(e); break;
++            }
++        }
++        devices.sort((a, b) -> deviceRank(a) != deviceRank(b) ? deviceRank(a) - deviceRank(b)
++                : label(a).compareToIgnoreCase(label(b)));
++        List<List<Ha.Entity>> out = new ArrayList<>();
++        out.add(scenes);
++        out.add(lights);
++        out.add(devices);
++        out.add(climate);
++        out.add(sensors);
++        return out;
++    }
++
++    private static final String[] SECTION_NAMES = {"Scenes", "Lights", "Devices", "Climate", "Sensors"};
++
++    private void rebuild(List<List<Ha.Entity>> sections) {
++        String focusedId = null;
++        for (Map.Entry<String, Tile> t : tiles.entrySet()) if (t.getValue().isFocused()) focusedId = t.getKey();
++        content.removeAllViews();
++        tiles.clear();
++        int width = getResources().getDisplayMetrics().widthPixels - px(112);
++        int gap = px(16);
++        for (int i = 0; i < sections.size(); i++) {
++            List<Ha.Entity> list = sections.get(i);
++            boolean door = i == 4 && doorRang != null;
++            if (list.isEmpty() && !door) continue;
++            heading(SECTION_NAMES[i]);
++            boolean wide = i == 0;
++            int columns = wide ? SCENE_COLUMNS : COLUMNS;
++            int tileW = (width - (columns - 1) * gap) / columns;
++            int tileH = px(wide ? 64 : 118);
++            List<Tile> row = new ArrayList<>();
++            if (door) {
++                Tile t = new Tile(this, false);
++                t.setTag("door");
++                tiles.put("door", t);
++                row.add(t);
++            }
++            for (Ha.Entity e : list) {
++                Tile t = new Tile(this, wide);
++                t.setTag(e.id);
++                tiles.put(e.id, t);
++                wire(t, e.id);
++                row.add(t);
++            }
++            for (int start = 0; start < row.size(); start += columns) {
++                LinearLayout line = new LinearLayout(this);
++                line.setOrientation(LinearLayout.HORIZONTAL);
++                line.setClipChildren(false);
++                for (int j = start; j < Math.min(start + columns, row.size()); j++) {
++                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(tileW, tileH);
++                    if (j > start) lp.setMarginStart(gap);
++                    line.addView(row.get(j), lp);
++                }
++                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                        ViewGroup.LayoutParams.WRAP_CONTENT);
++                if (start > 0) lp.topMargin = gap;
++                content.addView(line, lp);
+             }
+-            Ha.Call press = Ha.press(e);
+-            boolean steps = Ha.step(e, 1) != null;
+-            boolean bar = e.kind == Ha.Kind.TOGGLE && e.brightness >= 0;
+-            Row r = add(new Row(this, e.name, null, bar, press == null ? null : () -> send(Ha.press(e)),
+-                    steps ? d -> send(Ha.step(e, d)) : null));
+-            r.setValue(e.value());
+-            if (bar) r.setBar("on".equals(e.state) ? e.brightness / 100f : 0f);
+-            if (!e.available()) r.setAlpha(0.5f);
+-            if (e.kind == Ha.Kind.LOCK) r.setDetail("Shown only: locks aren't opened from the TV.");
+         }
++        for (List<Ha.Entity> s : sections) for (Ha.Entity e : s) bindTile(e);
++        bindDoor();
++
+         heading("Connection");
+-        Row url = add(new Row(this, "Home Assistant address", "For example http://192.168.1.10:8123", false,
+-                this::editUrl, null));
++        Row url = new Row(this, "Home Assistant address", "For example http://192.168.1.10:8123", false,
++                this::editUrl, null);
+         url.setValue(config.url.isEmpty() ? "Not set" : config.url);
+-        Row token = add(new Row(this, "Access token", "Stored on this TV only.", false, this::editToken, null));
++        Row token = new Row(this, "Access token", "Stored on this TV only.", false, this::editToken, null);
+         token.setValue(config.token.isEmpty() ? "Not set" : "Set");
++        content.addView(url);
++        content.addView(token);
+ 
+-        View keep = focused >= 0 && focused < rows.getChildCount() ? rows.getChildAt(focused) : null;
+-        if (keep != null && keep.isFocusable()) keep.requestFocus();
++        Tile keep = focusedId == null ? null : tiles.get(focusedId);
++        if (keep != null) keep.requestFocus();
+         else if (!config.complete()) url.requestFocus();
+-        else for (int i = 0; i < rows.getChildCount(); i++) {
+-            if (rows.getChildAt(i).isFocusable()) {
+-                rows.getChildAt(i).requestFocus();
+-                break;
++        else if (!tiles.isEmpty()) firstTile().requestFocus();
++    }
++
++    private Tile firstTile() {
++        for (int i = 0; i < content.getChildCount(); i++) {
++            View v = content.getChildAt(i);
++            if (v instanceof LinearLayout && ((LinearLayout) v).getChildCount() > 0
++                    && ((LinearLayout) v).getChildAt(0) instanceof Tile) return (Tile) ((LinearLayout) v).getChildAt(0);
++        }
++        return tiles.values().iterator().next();
++    }
++
++    private void wire(Tile t, String id) {
++        t.setOnClickListener(v -> {
++            Ha.Entity e = find(id);
++            if (e == null || !e.available()) return;
++            Ha.Call call = Ha.press(e);
++            if (call == null) return;
++            if (e.kind == Ha.Kind.SCENE) {
++                t.flash(R.drawable.ic_check, Tile.GREEN, null);
++                main.postDelayed(() -> bindTile(e), 1500);
++            } else if (e.kind == Ha.Kind.TOGGLE && !e.domain().equals("vacuum")) {
++                boolean on = !t.isOn();   // show it now; the next read confirms
++                t.bind(icon(e), label(e), on ? "On" : "Off", on, true, onColor(e));
+             }
++            send(call);
++        });
++        t.setLongClickable(true);
++        t.setOnLongClickListener(v -> {
++            Ha.Entity e = find(id);
++            if (e == null || Ha.step(e, 1) == null) return false;
++            startAdjust(e);
++            return true;
++        });
++    }
++
++    private void bindTile(Ha.Entity e) {
++        Tile t = tiles.get(e.id);
++        if (t == null) return;
++        if (e == adjusting || (adjusting != null && adjusting.id.equals(e.id))) return;
++        t.bind(icon(e), label(e), stateText(e), on(e), e.available(), onColor(e));
++        t.setBar(0, false);
++    }
++
++    private void bindDoor() {
++        Tile t = tiles.get("door");
++        if (t == null || doorRang == null) return;
++        boolean rang = !doorRang.isEmpty();
++        t.bind(R.drawable.ic_bell, "Front door", rang ? "Rang " + doorRang : "Quiet", rang, true, Tile.AMBER);
++    }
++
++    // ---- dimming --------------------------------------------------------------------------------------
++
++    private void startAdjust(Ha.Entity e) {
++        adjusting = e;
++        adjustLevel = e.kind == Ha.Kind.TOGGLE ? ("on".equals(e.state) ? Math.max(e.brightness, 0) : 0) : 0;
++        swallowOkUp = true;
++        Tile t = tiles.get(e.id);
++        if (t != null && e.kind == Ha.Kind.TOGGLE) t.setBar(adjustLevel / 100f, true);
++        status.setText(e.kind == Ha.Kind.TOGGLE ? "Left and Right dim " + label(e) + ". OK when done."
++                : "Left and Right set " + label(e) + ". OK when done.");
++        status.setVisibility(View.VISIBLE);
++    }
++
++    private void step(int direction) {
++        Ha.Entity e = adjusting;
++        if (e == null) return;
++        Tile t = tiles.get(e.id);
++        if (e.kind == Ha.Kind.TOGGLE && t != null) {
++            adjustLevel = Math.max(0, Math.min(100, adjustLevel + direction * 10));
++            boolean on = adjustLevel > 0;
++            t.bind(icon(e), label(e), on ? adjustLevel + "%" : "Off", on, true, onColor(e));
++            t.setBar(adjustLevel / 100f, true);
+         }
++        send(Ha.step(e, direction));
+     }
+ 
+-    private void addGlance(Ha.Glance g) {
+-        if (g.empty()) return;
+-        LinearLayout box = new LinearLayout(this);
+-        box.setOrientation(LinearLayout.HORIZONTAL);
+-        box.setGravity(Gravity.CENTER_VERTICAL);
+-        box.setPadding(px(16), px(8), px(16), px(20));
+-        if (!g.icon.isEmpty()) {
+-            ImageView icon = new ImageView(this);
+-            icon.setImageResource(weatherDrawable(g.icon));
+-            LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(px(56), px(56));
+-            ip.setMarginEnd(px(20));
+-            box.addView(icon, ip);
++    private void endAdjust() {
++        if (adjusting == null) return;
++        Ha.Entity e = adjusting;
++        adjusting = null;
++        swallowOkUp = false;
++        Tile t = tiles.get(e.id);
++        if (t != null) t.setBar(0, false);
++        status.setText(problem == null ? "" : problem);
++        status.setVisibility(status.getText().length() == 0 ? View.GONE : View.VISIBLE);
++        main.postDelayed(this::load, 400);
++    }
++
++    @Override
++    public boolean dispatchKeyEvent(KeyEvent event) {
++        if (adjusting == null) return super.dispatchKeyEvent(event);
++        boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
++        switch (event.getKeyCode()) {
++            case KeyEvent.KEYCODE_DPAD_LEFT:
++            case KeyEvent.KEYCODE_DPAD_RIGHT:
++                if (down) step(event.getKeyCode() == KeyEvent.KEYCODE_DPAD_RIGHT ? 1 : -1);
++                return true;
++            case KeyEvent.KEYCODE_DPAD_CENTER:
++            case KeyEvent.KEYCODE_ENTER:
++            case KeyEvent.KEYCODE_NUMPAD_ENTER:
++                // The long press that started this ends with an Up: let that one go, end on the next press.
++                if (!down && swallowOkUp) swallowOkUp = false;
++                else if (!down) endAdjust();
++                return true;
++            case KeyEvent.KEYCODE_BACK:
++            case KeyEvent.KEYCODE_ESCAPE:
++                if (!down) endAdjust();
++                return true;
++            case KeyEvent.KEYCODE_DPAD_UP:
++            case KeyEvent.KEYCODE_DPAD_DOWN:
++                endAdjust();
++                return super.dispatchKeyEvent(event);
++            default:
++                return super.dispatchKeyEvent(event);
+         }
+-        LinearLayout text = new LinearLayout(this);
+-        text.setOrientation(LinearLayout.VERTICAL);
+-        if (g.weather != null && g.weather.available() && !Double.isNaN(g.weather.current)) {
+-            TextView temp = new TextView(this);
+-            temp.setText(Ha.number(g.weather.current) + "°");
+-            temp.setTextSize(42);
+-            temp.setTextColor(0xFFFFFFFF);
+-            temp.setIncludeFontPadding(false);
+-            text.addView(temp);
++    }
++
++    // ---- what a tile says ---------------------------------------------------------------------------
++
++    private Ha.Entity find(String id) {
++        for (Ha.Entity e : entities) if (e.id.equals(id)) return e;
++        return null;
++    }
++
++    private static boolean on(Ha.Entity e) {
++        if (!e.available()) return false;
++        switch (e.kind) {
++            case TOGGLE:
++                return e.domain().equals("vacuum") ? "cleaning".equals(e.state) || "returning".equals(e.state)
++                        : "on".equals(e.state);
++            case CLIMATE:
++                return !"off".equals(e.state);
++            case OPENING:
++                return "on".equals(e.state);
++            case LOCK:
++                return !"locked".equals(e.state);
++            default:
++                return false;
+         }
+-        if (!g.prices.isEmpty()) {
+-            TextView prices = new TextView(this);
+-            StringBuilder line = new StringBuilder();
+-            for (Ha.Entity p : g.prices) {
+-                if (line.length() > 0) line.append("   ");
+-                line.append(p.name).append(' ').append(p.value());
+-            }
+-            prices.setText(line.toString());
+-            prices.setTextSize(16);
+-            prices.setTextColor(0xFF8B949E);
+-            prices.setPadding(0, px(4), 0, 0);
+-            text.addView(prices);
++    }
++
++    private static String stateText(Ha.Entity e) {
++        if (!e.available()) return "No response";
++        switch (e.kind) {
++            case SCENE:
++                return "";
++            case TOGGLE:
++                if (e.domain().equals("vacuum")) return e.value();
++                if (!"on".equals(e.state)) return "Off";
++                return e.brightness >= 0 ? e.brightness + "%" : "On";
++            default:
++                return e.value();
++        }
++    }
++
++    private static int onColor(Ha.Entity e) {
++        if (e.domain().equals("light")) return Tile.AMBER;
++        if (e.domain().equals("vacuum")) return Tile.GREEN;
++        if (e.kind == Ha.Kind.CLIMATE) return 0xFFFF9F0A;
++        if (e.kind == Ha.Kind.OPENING || e.kind == Ha.Kind.LOCK) return 0xFFFF9F0A;
++        return Tile.BLUE;
++    }
++
++    /** Sound bar switches lose their device prefix ("Night sound"): the speaker icon says what they belong to. */
++    private static String label(Ha.Entity e) {
++        String n = e.name.trim();
++        if (n.regionMatches(true, 0, "Sound Bar ", 0, 10) && n.length() > 10) {
++            n = n.substring(10);
++            n = Character.toUpperCase(n.charAt(0)) + n.substring(1);
++        }
++        return n;
++    }
++
++    /** Devices: plugs and switches, fans, the vacuum, sound bar settings, then helpers. */
++    private static int deviceRank(Ha.Entity e) {
++        String icon = Summary.icon(e.id, e.name);
++        if (e.domain().equals("input_boolean")) return 4;
++        if (icon.equals("speaker")) return 3;
++        if (e.domain().equals("vacuum")) return 2;
++        if (icon.equals("fan")) return 1;
++        return 0;
++    }
++
++    private static int icon(Ha.Entity e) {
++        String n = e.name.toLowerCase(Locale.ROOT);
++        switch (e.domain()) {
++            case "light":
++                return n.contains("tv") ? R.drawable.ic_tv : n.contains("lamp") ? R.drawable.ic_lamp : R.drawable.ic_bulb;
++            case "scene":
++            case "script":
++                return R.drawable.ic_sparkle;
++            case "vacuum":
++                return R.drawable.ic_vacuum;
++            case "climate":
++                return R.drawable.ic_thermo;
++            case "lock":
++                return R.drawable.ic_lock;
++            case "binary_sensor":
++                return R.drawable.ic_door;
++            case "sensor":
++                return n.contains("humid") ? R.drawable.ic_drop : R.drawable.ic_thermo;
++            default:
++                switch (Summary.icon(e.id, e.name)) {
++                    case "toggle": return R.drawable.ic_toggle;
++                    case "fan": return R.drawable.ic_fan;
++                    case "speaker": return R.drawable.ic_speaker;
++                    case "lamp": return R.drawable.ic_lamp;
++                    case "drop": return R.drawable.ic_drop;
++                    case "wave": return R.drawable.ic_wave;
++                    default: return R.drawable.ic_plug;
++                }
++        }
++    }
++
++    private static String condition(String icon) {
++        switch (icon) {
++            case "clear": case "night": return "Clear";
++            case "rain": return "Rain";
++            case "snow": return "Snow";
++            case "storm": return "Storms";
++            case "fog": return "Fog";
++            default: return "Cloudy";
+         }
+-        box.addView(text);
+-        rows.addView(box);
+     }
+ 
+     private static int weatherDrawable(String icon) {
+@@ -230,12 +574,15 @@ public class MainActivity extends Activity {
+         }
+     }
+ 
++    // ---- connection settings ----------------------------------------------------------------------
++
+     private void editUrl() {
+         edit("Home Assistant address", config.url.isEmpty() ? "http://" : config.url,
+                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI, v -> {
+                     String u = Ha.normalizeUrl(v);
+                     if (!u.isEmpty() && !Ha.validUrl(u)) {
+                         status.setText("That doesn't look like an address: " + u);
++                        status.setVisibility(View.VISIBLE);
+                         return;
+                     }
+                     Config.saveUrl(this, u);
+@@ -255,8 +602,11 @@ public class MainActivity extends Activity {
+         config = Config.load(this);
+         problem = null;
+         entities = new ArrayList<>();
++        people = new ArrayList<>();
++        doorRang = null;
++        layoutKey = "";
+         main.removeCallbacks(refresh);
+-        build();
++        render();
+         if (config.complete()) main.post(refresh);
+     }
+ 
+@@ -279,18 +629,26 @@ public class MainActivity extends Activity {
+         field.requestFocus();
+     }
+ 
++    // ---- small helpers ----------------------------------------------------------------------------
++
+     private void heading(String text) {
+-        TextView h = new TextView(this);
+-        h.setText(text);
+-        h.setTextSize(13);
+-        h.setTextColor(0xFF41BDF5);
+-        h.setPadding(px(16), px(18), 0, px(4));
+-        rows.addView(h);
++        TextView h = text(text, 15, 0x99FFFFFF, true);
++        h.setLetterSpacing(0.02f);
++        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
++                ViewGroup.LayoutParams.WRAP_CONTENT);
++        lp.topMargin = px(content.getChildCount() == 0 ? 22 : 30);
++        lp.bottomMargin = px(12);
++        content.addView(h, lp);
+     }
+ 
+-    private Row add(Row r) {
+-        rows.addView(r, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+-        return r;
++    private TextView text(String s, int sp, int color, boolean bold) {
++        TextView t = new TextView(this);
++        t.setText(s);
++        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
++        t.setTextColor(color);
++        if (bold) t.setTypeface(medium);
++        t.setIncludeFontPadding(false);
++        return t;
+     }
+ 
+     private int px(int dp) {
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Summary.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Summary.java
+new file mode 100644
+index 0000000..1e9ce79
+--- /dev/null
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Summary.java
+@@ -0,0 +1,130 @@
++package io.github.maxhayim.smarthome;
++
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++import java.time.Instant;
++import java.time.OffsetDateTime;
++import java.time.ZoneId;
++import java.time.format.DateTimeFormatter;
++import java.time.format.DateTimeParseException;
++import java.time.format.FormatStyle;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++
++/**
++ * Who's home and the front door, from GET /api/states (bravia), for the dashboard's header and its Front door tile.
++ * Settings come from the pushed config's "summary" object: {"doorbell": the automation whose last run is the last
++ * ring}. Pure Java and org.json, so JVM tests cover it.
++ */
++final class Summary {
++    /** For this long after the doorbell automation last ran, the door "rang"; after that it's quiet. */
++    static final long RANG_WINDOW_S = 6 * 3600;
++
++    static final class Person {
++        final String name;
++        final String state;
++
++        Person(String name, String state) {
++            this.name = name;
++            this.state = state;
++        }
++
++        boolean home() {
++            return "home".equals(state);
++        }
++    }
++
++    private Summary() {
++    }
++
++    /** person.* entities: the first word of the friendly name and the state, in Home Assistant's order. */
++    static List<Person> people(JSONArray states) {
++        List<Person> out = new ArrayList<>();
++        for (int i = 0; i < states.length(); i++) {
++            JSONObject o = states.optJSONObject(i);
++            if (o == null || !o.optString("entity_id").startsWith("person.")) continue;
++            String name = friendly(o).trim();
++            int space = name.indexOf(' ');
++            if (space > 0) name = name.substring(0, space);
++            if (name.isEmpty()) continue;
++            out.add(new Person(name, o.optString("state", "unknown")));
++        }
++        return out;
++    }
++
++    /** One line for people: "Everyone's home", "Nobody's home", "Alex is home", "Alex home, Sam away". */
++    static String headline(List<Person> people) {
++        if (people.isEmpty()) return "";
++        int home = 0;
++        for (Person p : people) if (p.home()) home++;
++        if (people.size() == 1) return people.get(0).name + (home == 1 ? " is home" : " is " + where(people.get(0)));
++        if (home == people.size()) return "Everyone's home";
++        if (home == 0) return "Nobody's home";
++        StringBuilder b = new StringBuilder();
++        for (Person p : people) {
++            if (b.length() > 0) b.append(", ");
++            b.append(p.name).append(p.home() ? " home" : " " + (p.state.equals("not_home") ? "away" : "at " + zone(p.state)));
++        }
++        return b.toString();
++    }
++
++    /** "away", or "at Work" for a zone. */
++    static String where(Person p) {
++        return "not_home".equals(p.state) || "unknown".equals(p.state) || "unavailable".equals(p.state)
++                ? "away" : "at " + zone(p.state);
++    }
++
++    private static String zone(String state) {
++        String s = state.replace('_', ' ').trim();
++        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
++    }
++
++    /**
++     * null when no doorbell is configured (or it isn't in Home Assistant); "" when it hasn't rung within
++     * {@link #RANG_WINDOW_S}; else the time it rang, like "2:14 PM".
++     */
++    static String doorRang(JSONArray states, Config c, long nowMs, ZoneId zone, Locale locale) {
++        JSONObject d = find(states, c.summarySettings().optString("doorbell", ""));
++        if (d == null) return null;
++        JSONObject a = d.optJSONObject("attributes");
++        String last = a == null ? "" : a.optString("last_triggered", "");
++        if (last.isEmpty() || "null".equals(last)) return "";
++        try {
++            Instant at = OffsetDateTime.parse(last).toInstant();
++            long ago = nowMs / 1000 - at.getEpochSecond();
++            if (ago < -60 || ago > RANG_WINDOW_S) return "";
++            return DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).withLocale(locale).withZone(zone).format(at);
++        } catch (DateTimeParseException e) {
++            return "";
++        }
++    }
++
++    /** The icon for a switch, plug or helper, by domain and name. */
++    static String icon(String id, String name) {
++        String n = name.toLowerCase(Locale.ROOT);
++        if (id.startsWith("input_boolean.")) return "toggle";
++        if (id.startsWith("fan.") || n.contains("fan")) return "fan";
++        if (n.contains("sound bar") || n.contains("speaker")) return "speaker";
++        if (n.contains("lamp") || n.contains("lantern")) return "lamp";
++        if (n.contains("water")) return "drop";
++        if (n.contains("noise")) return "wave";
++        return "plug";
++    }
++
++    static String friendly(JSONObject o) {
++        JSONObject a = o.optJSONObject("attributes");
++        String n = a == null ? "" : a.optString("friendly_name", "");
++        return n.isEmpty() ? o.optString("entity_id") : n;
++    }
++
++    private static JSONObject find(JSONArray states, String id) {
++        if (id == null || id.isEmpty()) return null;
++        for (int i = 0; i < states.length(); i++) {
++            JSONObject o = states.optJSONObject(i);
++            if (o != null && id.equals(o.optString("entity_id"))) return o;
++        }
++        return null;
++    }
++}
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Tile.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Tile.java
+new file mode 100644
+index 0000000..8293f4e
+--- /dev/null
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Tile.java
+@@ -0,0 +1,168 @@
++package io.github.maxhayim.smarthome;
++
++import android.content.Context;
++import android.content.res.ColorStateList;
++import android.graphics.Rect;
++import android.graphics.Typeface;
++import android.graphics.drawable.GradientDrawable;
++import android.text.TextUtils;
++import android.util.TypedValue;
++import android.view.Gravity;
++import android.view.View;
++import android.widget.FrameLayout;
++import android.widget.ImageView;
++import android.widget.LinearLayout;
++import android.widget.TextView;
++
++/**
++ * One dashboard tile, in the manner of Apple's Home app (bravia). Off: dark glass, white name. On: light tile,
++ * dark name, the icon in its colour (amber for lights). Focus lifts the tile with a soft white glow instead of an
++ * outline. A dimmable light can show a brightness bar while Left and Right dim it. A wide tile is a scene pill.
++ */
++final class Tile extends FrameLayout {
++    static final int AMBER = 0xFFFFB21E;
++    static final int BLUE = 0xFF0A84FF;
++    static final int GREEN = 0xFF30D158;
++
++    private final float dp;
++    private final boolean wide;
++    private final GradientDrawable bg = new GradientDrawable();
++    private final ImageView icon;
++    private final TextView name;
++    private final TextView state;
++    private final View barFill;
++    private final LinearLayout bar;
++    private boolean on;
++    private int onColor = AMBER;
++
++    Tile(Context c, boolean wide) {
++        super(c);
++        this.wide = wide;
++        dp = c.getResources().getDisplayMetrics().density;
++        setFocusable(true);
++        setClickable(true);
++        setClipToOutline(false);
++        bg.setCornerRadius((wide ? 20 : 22) * dp);
++        setBackground(bg);
++        Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
++
++        icon = new ImageView(c);
++        name = new TextView(c);
++        name.setTypeface(medium);
++        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, wide ? 17 : 15);
++        name.setEllipsize(TextUtils.TruncateAt.END);
++        state = new TextView(c);
++        state.setTextSize(TypedValue.COMPLEX_UNIT_SP, wide ? 13 : 13);
++        state.setSingleLine(true);
++        state.setEllipsize(TextUtils.TruncateAt.END);
++
++        bar = new LinearLayout(c);
++        bar.setOrientation(LinearLayout.HORIZONTAL);
++        GradientDrawable track = new GradientDrawable();
++        track.setCornerRadius(2 * dp);
++        track.setColor(0x26000000);
++        bar.setBackground(track);
++        barFill = new View(c);
++        GradientDrawable fill = new GradientDrawable();
++        fill.setCornerRadius(2 * dp);
++        fill.setColor(AMBER);
++        barFill.setBackground(fill);
++        bar.addView(barFill, new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 0f));
++        bar.addView(new View(c), new LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f));
++        bar.setVisibility(GONE);
++
++        int pad = Math.round((wide ? 18 : 14) * dp);
++        if (wide) {
++            LinearLayout row = new LinearLayout(c);
++            row.setOrientation(LinearLayout.HORIZONTAL);
++            row.setGravity(Gravity.CENTER_VERTICAL);
++            row.setPadding(pad, 0, pad, 0);
++            row.addView(icon, new LinearLayout.LayoutParams(Math.round(26 * dp), Math.round(26 * dp)));
++            LinearLayout text = new LinearLayout(c);
++            text.setOrientation(LinearLayout.VERTICAL);
++            name.setSingleLine(true);
++            text.addView(name);
++            text.addView(state);
++            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f);
++            tp.setMarginStart(Math.round(14 * dp));
++            row.addView(text, tp);
++            addView(row, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
++        } else {
++            LinearLayout col = new LinearLayout(c);
++            col.setOrientation(LinearLayout.VERTICAL);
++            col.setPadding(pad, pad, pad, Math.round(12 * dp));
++            col.addView(icon, new LinearLayout.LayoutParams(Math.round(30 * dp), Math.round(30 * dp)));
++            col.addView(new View(c), new LinearLayout.LayoutParams(1, 0, 1f));
++            name.setMaxLines(2);
++            col.addView(name);
++            col.addView(state);
++            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, Math.round(4 * dp));
++            bp.topMargin = Math.round(6 * dp);
++            col.addView(bar, bp);
++            addView(col, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
++        }
++        restyle();
++    }
++
++    /** onColor tints the icon when on: AMBER for lights, BLUE for switches, GREEN for a running vacuum. */
++    void bind(int iconRes, String title, String status, boolean on, boolean available, int onColor) {
++        this.on = on && available;
++        this.onColor = onColor;
++        icon.setImageResource(iconRes);
++        name.setText(title);
++        state.setText(status);
++        state.setVisibility(status == null || status.isEmpty() ? GONE : VISIBLE);
++        setAlpha(available ? 1f : 0.45f);
++        restyle();
++    }
++
++    boolean isOn() {
++        return on;
++    }
++
++    /** A brightness bar, 0 to 1, shown while Left and Right dim the light. */
++    void setBar(float fraction, boolean visible) {
++        bar.setVisibility(visible ? VISIBLE : GONE);
++        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) barFill.getLayoutParams();
++        lp.weight = Math.max(0f, Math.min(1f, fraction));
++        ((LinearLayout.LayoutParams) bar.getChildAt(1).getLayoutParams()).weight = 1f - lp.weight;
++        bar.requestLayout();
++    }
++
++    /** Briefly swaps the icon, e.g. a green check after a scene ran. */
++    void flash(int iconRes, int color, String status) {
++        icon.setImageResource(iconRes);
++        icon.setImageTintList(ColorStateList.valueOf(color));
++        if (status != null) {
++            state.setText(status);
++            state.setVisibility(VISIBLE);
++        }
++    }
++
++    private void restyle() {
++        boolean focused = isFocused();
++        if (on) {
++            bg.setColor(0xFFF2F2F7);
++            name.setTextColor(0xFF1C1C1E);
++            state.setTextColor(0xFF6C6C70);
++            icon.setImageTintList(ColorStateList.valueOf(onColor));
++        } else {
++            bg.setColor(focused ? 0x42FFFFFF : 0x1FFFFFFF);
++            name.setTextColor(0xFFFFFFFF);
++            state.setTextColor(0x99FFFFFF);
++            icon.setImageTintList(ColorStateList.valueOf(wide ? 0xFFFFC94D : 0xCCFFFFFF));
++        }
++    }
++
++    @Override
++    protected void onFocusChanged(boolean gainFocus, int direction, Rect previouslyFocusedRect) {
++        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect);
++        restyle();
++        float scale = gainFocus ? (wide ? 1.05f : 1.08f) : 1f;
++        animate().scaleX(scale).scaleY(scale).translationZ(gainFocus ? 14 * dp : 0).setDuration(150).start();
++        if (android.os.Build.VERSION.SDK_INT >= 28) {   // a white glow, not a black shadow, on the dark page
++            setOutlineSpotShadowColor(0x8CFFFFFF);
++            setOutlineAmbientShadowColor(0x59FFFFFF);
++        }
++    }
++}
+diff --git a/addons/smart-home/app/src/main/res/drawable/banner.xml b/addons/smart-home/app/src/main/res/drawable/banner.xml
+index a4a493b..436783f 100644
+--- a/addons/smart-home/app/src/main/res/drawable/banner.xml
++++ b/addons/smart-home/app/src/main/res/drawable/banner.xml
+@@ -1,10 +1,44 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<!-- 16:9 banner: a house with a lit bulb and a thermometer. Own art. -->
++<!-- 16:9 banner (bravia): a house in white line on a deep evening blue, one window lit warm. Own art. -->
+ <vector xmlns:android="http://schemas.android.com/apk/res/android"
+-    android:width="320dp" android:height="180dp"
+-    android:viewportWidth="320" android:viewportHeight="180">
+-    <path android:fillColor="#101418" android:pathData="M0,0h320v180h-320z" />
+-    <path android:strokeColor="#41BDF5" android:strokeWidth="8" android:fillColor="#00000000" android:pathData="M100,90l60,-50l60,50v54h-120z" />
+-    <path android:fillColor="#FFD54F" android:pathData="M160,82a16,16 0 1 1 -0.1,0zM152,112h16v10h-16z" />
+-    <path android:fillColor="#FFFFFF" android:pathData="M244,60h10v56h-10zM249,128a10,10 0 1 1 -0.1,0z" />
++    xmlns:aapt="http://schemas.android.com/aapt"
++    android:width="320dp"
++    android:height="180dp"
++    android:viewportWidth="320"
++    android:viewportHeight="180">
++    <path android:pathData="M0,0h320v180h-320z">
++        <aapt:attr name="android:fillColor">
++            <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="320" android:endY="180"
++                android:startColor="#FF0B1A2E" android:endColor="#FF1A4670" />
++        </aapt:attr>
++    </path>
++    <path android:pathData="M0,0h320v180h-320z">
++        <aapt:attr name="android:fillColor">
++            <gradient android:type="radial" android:centerX="160" android:centerY="96" android:gradientRadius="130"
++                android:startColor="#4D7FB8E6" android:endColor="#007FB8E6" />
++        </aapt:attr>
++    </path>
++    <path android:pathData="M160,109m-34,0a34,34 0 1,0 68,0a34,34 0 1,0 -68,0">
++        <aapt:attr name="android:fillColor">
++            <gradient android:type="radial" android:centerX="160" android:centerY="109" android:gradientRadius="34"
++                android:startColor="#80FFC94D" android:endColor="#00FFC94D" />
++        </aapt:attr>
++    </path>
++    <path
++        android:pathData="M114,92L160,53L206,92"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="7"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M126,82V131H194V82"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="7"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:fillColor="#FFFFC94D"
++        android:pathData="M150,99h20v19h-20z" />
+ </vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_bell.xml b/addons/smart-home/app/src/main/res/drawable/ic_bell.xml
+new file mode 100644
+index 0000000..1ba61dd
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_bell.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "bell", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M6,16.5V11a6,6 0 0,1 12,0v5.5l1.5,1.5h-15z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M10,20.5a2,2 0 0,0 4,0"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_bulb.xml b/addons/smart-home/app/src/main/res/drawable/ic_bulb.xml
+new file mode 100644
+index 0000000..d0ccef5
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_bulb.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "bulb", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M9,17v-1.4c0,-1 -0.6,-1.9 -1.4,-2.7A6,6 0 1,1 16.4,12.9c-0.8,0.8 -1.4,1.7 -1.4,2.7V17z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M9.5,19.5h5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M10.5,21.8h3"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_check.xml b/addons/smart-home/app/src/main/res/drawable/ic_check.xml
+new file mode 100644
+index 0000000..e0d28ee
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_check.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "check", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M5,12.5l4.5,4.5l9.5,-10"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_door.xml b/addons/smart-home/app/src/main/res/drawable/ic_door.xml
+new file mode 100644
+index 0000000..4f870d4
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_door.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "door", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M6,21V3.5h12V21"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M4,21h16"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M14.5,12.5v0.01"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_drop.xml b/addons/smart-home/app/src/main/res/drawable/ic_drop.xml
+new file mode 100644
+index 0000000..5bd1a53
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_drop.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "drop", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M12,3.5c0,0 -6,6.6 -6,11a6,6 0 0,0 12,0c0,-4.4 -6,-11 -6,-11z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_fan.xml b/addons/smart-home/app/src/main/res/drawable/ic_fan.xml
+new file mode 100644
+index 0000000..fba4a91
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_fan.xml
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "fan", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M3,12a9,9 0 1,0 18,0a9,9 0 1,0 -18,0"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,12V5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,12l6,3.5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,12l-6,3.5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_home.xml b/addons/smart-home/app/src/main/res/drawable/ic_home.xml
+new file mode 100644
+index 0000000..57c6b6e
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_home.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "home", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M4,11l8,-7l8,7"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M6,9.5V20h12V9.5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M10,20v-5h4v5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_lamp.xml b/addons/smart-home/app/src/main/res/drawable/ic_lamp.xml
+new file mode 100644
+index 0000000..952061c
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_lamp.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "lamp", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M7.5,4h9l2.5,7h-14z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,11v8.5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M8.5,20.5h7"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_lock.xml b/addons/smart-home/app/src/main/res/drawable/ic_lock.xml
+new file mode 100644
+index 0000000..d29b556
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_lock.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "lock", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M6.5,11h11v9h-11z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M9,11V8a3,3 0 0,1 6,0v3"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_plug.xml b/addons/smart-home/app/src/main/res/drawable/ic_plug.xml
+new file mode 100644
+index 0000000..f346e95
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_plug.xml
+@@ -0,0 +1,36 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "plug", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M8.5,3v4"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M15.5,3v4"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M5.5,7h13v3.5a6.5,6.5 0 0,1 -13,0z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,17v4"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_sparkle.xml b/addons/smart-home/app/src/main/res/drawable/ic_sparkle.xml
+new file mode 100644
+index 0000000..6e49da8
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_sparkle.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "sparkle", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M11,3l1.8,4.7l4.7,1.8l-4.7,1.8l-1.8,4.7l-1.8,-4.7l-4.7,-1.8l4.7,-1.8z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M18,14.5l0.8,2l2,0.8l-2,0.8l-0.8,2l-0.8,-2l-2,-0.8l2,-0.8z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_speaker.xml b/addons/smart-home/app/src/main/res/drawable/ic_speaker.xml
+new file mode 100644
+index 0000000..95e340a
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_speaker.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "speaker", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M4,9h3l5,-4v14l-5,-4H4z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M15.5,9.5a3.5,3.5 0 0,1 0,5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M18,7a7,7 0 0,1 0,10"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_thermo.xml b/addons/smart-home/app/src/main/res/drawable/ic_thermo.xml
+new file mode 100644
+index 0000000..2b781db
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_thermo.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "thermo", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M10,13.5V5a2,2 0 0,1 4,0v8.5a4,4 0 1,1 -4,0z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M12,16v0.01"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_toggle.xml b/addons/smart-home/app/src/main/res/drawable/ic_toggle.xml
+new file mode 100644
+index 0000000..ec5a0b6
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_toggle.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "toggle", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M8,7h8a5,5 0 0,1 0,10h-8a5,5 0 0,1 0,-10z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M13.4,12a2.6,2.6 0 1,0 5.2,0a2.6,2.6 0 1,0 -5.2,0"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_tv.xml b/addons/smart-home/app/src/main/res/drawable/ic_tv.xml
+new file mode 100644
+index 0000000..0458961
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_tv.xml
+@@ -0,0 +1,22 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "tv", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M3.5,5.5h17v11h-17z"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M9,20h6"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_vacuum.xml b/addons/smart-home/app/src/main/res/drawable/ic_vacuum.xml
+new file mode 100644
+index 0000000..efdd36c
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_vacuum.xml
+@@ -0,0 +1,29 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "vacuum", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M3,12a9,9 0 1,0 18,0a9,9 0 1,0 -18,0"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M7,7.5h10"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++    <path
++        android:pathData="M10.4,13a1.6,1.6 0 1,0 3.2,0a1.6,1.6 0 1,0 -3.2,0"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/drawable/ic_wave.xml b/addons/smart-home/app/src/main/res/drawable/ic_wave.xml
+new file mode 100644
+index 0000000..25263c7
+--- /dev/null
++++ b/addons/smart-home/app/src/main/res/drawable/ic_wave.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- Generated by bravia-tv (make_icons.py): outline icon "wave", 24x24, tinted in code. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++    android:width="24dp"
++    android:height="24dp"
++    android:viewportWidth="24"
++    android:viewportHeight="24">
++    <path
++        android:pathData="M3,12h2.5l2,-5l3,10l3,-13l3,15l2,-7h2.5"
++        android:fillColor="#00000000"
++        android:strokeColor="#FFFFFFFF"
++        android:strokeWidth="1.8"
++        android:strokeLineCap="round"
++        android:strokeLineJoin="round" />
++</vector>
+diff --git a/addons/smart-home/app/src/main/res/xml/module_card.xml b/addons/smart-home/app/src/main/res/xml/module_card.xml
+index 118f995..4ce6007 100644
+--- a/addons/smart-home/app/src/main/res/xml/module_card.xml
++++ b/addons/smart-home/app/src/main/res/xml/module_card.xml
+@@ -1,2 +1,3 @@
+ <?xml version="1.0" encoding="utf-8"?>
+-<card spec="1" label="Smart Home" caption="At a glance" accent="#41BDF5" />
++<!-- bravia: the label stays "Smart Home" ("Home" is reserved, and a new label would ask for approval again). -->
++<card spec="1" label="Smart Home" caption="Dashboard" accent="#41BDF5" />
+diff --git a/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/SummaryTest.java b/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/SummaryTest.java
+new file mode 100644
+index 0000000..edd5f8f
+--- /dev/null
++++ b/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/SummaryTest.java
+@@ -0,0 +1,94 @@
++package io.github.maxhayim.smarthome;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import org.json.JSONArray;
++import org.junit.Test;
++
++import java.time.ZoneId;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.util.Locale;
++
++/** Who's home and the front door, for the dashboard (bravia). */
++public class SummaryTest {
++    static final long NOW = 1_762_470_000_000L;          // 2025-11-06T23:00:00Z
++    static final ZoneId ZONE = java.time.ZoneOffset.ofHours(-8);   // fixed, so tz data updates cannot move it
++
++    static String states(String... extra) {
++        StringBuilder b = new StringBuilder("["
++                + "{\"entity_id\":\"person.alex_morgan\",\"state\":\"home\",\"attributes\":{\"friendly_name\":\"Alex Morgan\"}},"
++                + "{\"entity_id\":\"person.sam\",\"state\":\"not_home\",\"attributes\":{\"friendly_name\":\"Sam\"}},"
++                + "{\"entity_id\":\"light.floor\",\"state\":\"on\",\"attributes\":{\"friendly_name\":\"Floor Lamp\",\"brightness\":153}},"
++                + "{\"entity_id\":\"light.table\",\"state\":\"off\",\"attributes\":{\"friendly_name\":\"Table Lamp\"}},"
++                + "{\"entity_id\":\"light.patio_light_segment_1\",\"state\":\"on\",\"attributes\":{}},"
++                + "{\"entity_id\":\"light.patio_all\",\"state\":\"on\",\"attributes\":{\"friendly_name\":\"Patio All\",\"entity_id\":[\"light.a\",\"light.b\"]}},"
++                + "{\"entity_id\":\"vacuum.robovac\",\"state\":\"docked\",\"attributes\":{\"friendly_name\":\"RoboVac\"}},"
++                + "{\"entity_id\":\"switch.waterfall\",\"state\":\"on\",\"attributes\":{\"friendly_name\":\"Waterfall\"}},"
++                + "{\"entity_id\":\"input_boolean.guest_mode\",\"state\":\"off\",\"attributes\":{\"friendly_name\":\"Guest Mode\"}}");
++        for (String e : extra) b.append(',').append(e);
++        return b.append(']').toString();
++    }
++
++    static Config config(String summary) {
++        return new Config("http://ha:8123", "t", Collections.emptyList(),
++                Arrays.asList("light.*_segment_*"), summary);
++    }
++
++    static String door(String lastTriggered) {
++        return "{\"entity_id\":\"automation.tv_front_door_pop_up\",\"state\":\"on\",\"attributes\":{\"last_triggered\":"
++                + (lastTriggered == null ? "null" : "\"" + lastTriggered + "\"") + "}}";
++    }
++
++    static final String SETTINGS = "{\"doorbell\":\"automation.tv_front_door_pop_up\","
++            + "\"extras\":[\"input_boolean.guest_mode\",\"switch.waterfall\"]}";
++
++    @Test
++    public void peopleAreFirstNamesWithTheirState() throws Exception {
++        List<Summary.Person> p = Summary.people(new JSONArray(states()));
++        assertEquals(2, p.size());
++        assertEquals("Alex", p.get(0).name);
++        assertTrue(p.get(0).home());
++        assertEquals("Sam", p.get(1).name);
++        assertFalse(p.get(1).home());
++    }
++
++    @Test
++    public void headlines() {
++        Summary.Person h = new Summary.Person("Alex", "home");
++        Summary.Person b = new Summary.Person("Sam", "home");
++        Summary.Person away = new Summary.Person("Sam", "not_home");
++        Summary.Person work = new Summary.Person("Sam", "Work");
++        assertEquals("Everyone's home", Summary.headline(Arrays.asList(h, b)));
++        assertEquals("Alex home, Sam away", Summary.headline(Arrays.asList(h, away)));
++        assertEquals("Alex home, Sam at Work", Summary.headline(Arrays.asList(h, work)));
++        assertEquals("Nobody's home", Summary.headline(Arrays.asList(new Summary.Person("Alex", "not_home"), away)));
++        assertEquals("Alex is home", Summary.headline(Collections.singletonList(h)));
++        assertEquals("", Summary.headline(Collections.emptyList()));
++    }
++
++    @Test
++    public void aRecentRingShowsItsTime() throws Exception {
++        String rang = Summary.doorRang(new JSONArray(states(door("2025-11-06T22:14:03.123456+00:00"))),
++                config(SETTINGS), NOW, ZONE, Locale.US);
++        assertTrue(rang, rang.startsWith("2:14"));       // 22:14Z is 2:14 PM at UTC-8
++    }
++
++    @Test
++    public void anOldRingIsQuietAndNoDoorbellMeansNothing() throws Exception {
++        assertEquals("", Summary.doorRang(new JSONArray(states(door("2025-11-05T22:14:03+00:00"))),
++                config(SETTINGS), NOW, ZONE, Locale.US));
++        assertNull(Summary.doorRang(new JSONArray(states()), config(SETTINGS), NOW, ZONE, Locale.US));
++        assertNull(Summary.doorRang(new JSONArray(states(door(null))), config(""), NOW, ZONE, Locale.US));
++    }
++
++    @Test
++    public void summarySettingsSurviveBadJson() {
++        assertEquals(0, config("not json").summarySettings().length());
++        assertEquals("automation.x", config("{\"doorbell\":\"automation.x\"}").summarySettings().optString("doorbell"));
++    }
++}

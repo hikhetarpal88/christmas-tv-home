@@ -1,0 +1,3452 @@
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Config.java b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+index c2330d3..8c723da 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Config.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+@@ -622,7 +622,9 @@ final class Config {
+         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
+                 string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""),
+                 json.optJSONObject("festival_days"), json.optJSONArray("festival_decor"),
+-                json.optJSONArray("festival_fireworks"));
++                json.optJSONArray("festival_fireworks"), json.optJSONObject("festival_calendar"),
++                string(json, "festival_tree_from", ""), string(json, "festival_preview_date", ""),
++                string(json, "festival_preview_moment", ""), string(json, "festival_replay", ""));
+ 
+         return new Config(dock, fillDock, hidden, libraryApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
+                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputUriScheme, Math.max(1, columns),
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+index 7972555..84fc2f9 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+@@ -43,13 +43,41 @@ final class Festival {
+     final Set<String> decor;
+     /** bravia: festival_fireworks, the nights with fireworks. */
+     final Set<LocalDate> fireworks;
++    /** bravia: festival_calendar, what each day brings (HolidayDecor): a moment, the gnome's spot, a sky, a style. */
++    final Map<LocalDate, Day> calendar;
++    /** bravia: festival_tree_from, the day the tree arrives (HolidayDecor); null for no tree. */
++    final LocalDate treeFrom;
++    /** bravia: festival_preview_date, a day to show in place of today, for screenshots; null normally. */
++    final LocalDate previewDate;
++    /** bravia: festival_preview_moment, a moment held still part-way ("sleigh@0.5"), for screenshots; "" normally. */
++    final String previewMoment;
++    /**
++     * bravia: a fingerprint of the season's content (days, calendar, decor, festival_replay). Today's moment plays
++     * once per day per fingerprint, so a changed theme, or a new festival_replay value, plays it again.
++     */
++    final String signature;
++
++    /** One day of festival_calendar. Unknown names are ignored by whoever reads them; "" means none. */
++    static final class Day {
++        static final Day NONE = new Day("", "", "", "");
++        final String moment, gnome, sky, style;
++
++        Day(String moment, String gnome, String sky, String style) {
++            this.moment = moment;
++            this.gnome = gnome;
++            this.sky = sky;
++            this.style = style;
++        }
++    }
+ 
+     private Festival(String name, LocalDate until, String greeting, int accent) {
+-        this(name, until, greeting, accent, Collections.emptyMap(), Collections.emptySet(), Collections.emptySet());
++        this(name, until, greeting, accent, Collections.emptyMap(), Collections.emptySet(), Collections.emptySet(),
++                Collections.emptyMap(), null, null, "", "");
+     }
+ 
+     private Festival(String name, LocalDate until, String greeting, int accent, Map<LocalDate, String> days,
+-                     Set<String> decor, Set<LocalDate> fireworks) {
++                     Set<String> decor, Set<LocalDate> fireworks, Map<LocalDate, Day> calendar, LocalDate treeFrom,
++                     LocalDate previewDate, String previewMoment, String signature) {
+         this.name = name;
+         this.until = until;
+         this.greeting = greeting;
+@@ -57,6 +85,11 @@ final class Festival {
+         this.days = days;
+         this.decor = decor;
+         this.fireworks = fireworks;
++        this.calendar = calendar;
++        this.treeFrom = treeFrom;
++        this.previewDate = previewDate;
++        this.previewMoment = previewMoment;
++        this.signature = signature;
+     }
+ 
+     /**
+@@ -81,6 +114,16 @@ final class Festival {
+     /** The same, with the bravia extras: festival_days, festival_decor and festival_fireworks (each may be null). */
+     static Festival parse(String name, String until, String greeting, String accent, JSONObject days,
+                           JSONArray decor, JSONArray fireworks) {
++        return parse(name, until, greeting, accent, days, decor, fireworks, null, null, null, null, null);
++    }
++
++    /**
++     * And festival_calendar ({"2026-12-01": {"moment": "gnome_arrives", "gnome": "pill:settings"}}),
++     * festival_tree_from, festival_preview_date and festival_preview_moment. Anything unreadable is left out.
++     */
++    static Festival parse(String name, String until, String greeting, String accent, JSONObject days,
++                          JSONArray decor, JSONArray fireworks, JSONObject calendar, String treeFrom,
++                          String previewDate, String previewMoment, String replay) {
+         Festival base = parse(name, until, greeting, accent);
+         if (base == NONE) return NONE;
+         Map<LocalDate, String> byDay = new HashMap<>();
+@@ -108,8 +151,53 @@ final class Festival {
+                 // left out
+             }
+         }
++        Map<LocalDate, Day> plan = new HashMap<>();
++        if (calendar != null) {
++            for (Iterator<String> it = calendar.keys(); it.hasNext(); ) {
++                String key = it.next();
++                JSONObject o = calendar.optJSONObject(key);
++                if (o == null) continue;
++                try {
++                    plan.put(LocalDate.parse(key.trim()), new Day(word(o, "moment"), word(o, "gnome"), word(o, "sky"),
++                            word(o, "style")));
++                } catch (DateTimeParseException ignored) {
++                    // left out
++                }
++            }
++        }
+         return new Festival(base.name, base.until, base.greeting, base.accent, Collections.unmodifiableMap(byDay),
+-                Collections.unmodifiableSet(names), Collections.unmodifiableSet(nights));
++                Collections.unmodifiableSet(names), Collections.unmodifiableSet(nights),
++                Collections.unmodifiableMap(plan), date(treeFrom), date(previewDate), previewMoment == null ? ""
++                : previewMoment.trim().toLowerCase(Locale.ROOT),
++                Integer.toHexString(java.util.Objects.hash(name, until, days == null ? "" : days.toString(),
++                        calendar == null ? "" : calendar.toString(), decor == null ? "" : decor.toString(),
++                        treeFrom, replay)));
++    }
++
++    /** A short lower-case word from a calendar entry: letters, digits and : _ - . @ + only. */
++    private static String word(JSONObject o, String key) {
++        String s = o.optString(key, "").trim().toLowerCase(Locale.ROOT);
++        return s.length() <= 40 && s.matches("[a-z0-9:_.@+-]*") ? s : "";
++    }
++
++    private static LocalDate date(String s) {
++        if (s == null || s.trim().isEmpty()) return null;
++        try {
++            return LocalDate.parse(s.trim());
++        } catch (DateTimeParseException e) {
++            return null;
++        }
++    }
++
++    /** festival_calendar's entry for a day, or {@link Day#NONE}. */
++    Day day(LocalDate date) {
++        Day d = calendar.get(date);
++        return d != null ? d : Day.NONE;
++    }
++
++    /** The day the decorations show: festival_preview_date when a theme sets one (screenshots), else today. */
++    LocalDate today() {
++        return previewDate != null ? previewDate : LocalDate.now();
+     }
+ 
+     boolean decor(String name) {
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/HolidayArt.java b/launcher/app/src/main/java/com/gathin/tvhome/HolidayArt.java
+new file mode 100644
+index 0000000..6077868
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/HolidayArt.java
+@@ -0,0 +1,791 @@
++package com.gathin.tvhome;
++
++import android.content.Context;
++import android.graphics.Bitmap;
++import android.graphics.Canvas;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.graphics.PointF;
++import android.graphics.RadialGradient;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.util.SparseArray;
++import android.view.View;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * bravia: the Christmas scene's still pieces (HolidayDecor puts them on Home): the night sky, the fairy lights
++ * along the top, the tree of lights with its Advent ornaments, star and presents, the gnome, the cardinal and the
++ * frost. Each is drawn once into a hardware layer and only moved, faded or redrawn when the day changes, so on
++ * this TV's GPU a frame is compositing rather than drawing (the lesson of the Diwali lamps).
++ */
++final class HolidayArt {
++    private HolidayArt() {
++    }
++
++    // ---- shared sprites ---------------------------------------------------------------------------
++
++    private static final SparseArray<Bitmap> GLOWS = new SparseArray<>();
++
++    /**
++     * A soft round glow, white in the middle fading out, size x size pixels, cached by size and colour. Drawn
++     * with a paint's alpha and colour filter it serves as a bulb's halo, a snowflake or a bokeh disc.
++     */
++    static Bitmap glow(int size, int color, float core) {
++        int key = (size * 31 + color) * 7 + Math.round(core * 100);
++        Bitmap b = GLOWS.get(key);
++        if (b != null && !b.isRecycled()) return b;
++        size = Math.max(2, size);
++        b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
++        Canvas c = new Canvas(b);
++        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++        int clear = color & 0x00FFFFFF;
++        p.setShader(new RadialGradient(size / 2f, size / 2f, size / 2f,
++                new int[]{0xFFFFFFFF, color, (color & 0x00FFFFFF) | 0x44000000, clear},
++                new float[]{0f, core, Math.min(1f, core + (1f - core) * 0.45f), 1f}, Shader.TileMode.CLAMP));
++        c.drawCircle(size / 2f, size / 2f, size / 2f, p);
++        GLOWS.put(key, b);
++        return b;
++    }
++
++    static View quiet(View v) {
++        v.setFocusable(false);
++        v.setClickable(false);
++        v.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
++        return v;
++    }
++
++    /** A view drawn once and kept as a texture: moving or fading it costs nothing more. */
++    abstract static class Still extends View {
++        final float d;
++
++        Still(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            quiet(this);
++            setWillNotDraw(false);
++            setLayerType(LAYER_TYPE_HARDWARE, null);
++        }
++
++        float dp(float v) {
++            return v * d;
++        }
++    }
++
++    // ---- sky --------------------------------------------------------------------------------------
++
++    /** A clear winter night: deep blue going lighter toward the dock, a field of stars, and on some nights a moon. */
++    static final class WinterSky extends Still {
++        private final Paint grad = new Paint(), warm = new Paint(), star = new Paint(Paint.ANTI_ALIAS_FLAG),
++                glint = new Paint(Paint.ANTI_ALIAS_FLAG), moonHalo = new Paint(Paint.ANTI_ALIAS_FLAG),
++                moonFace = new Paint(Paint.ANTI_ALIAS_FLAG), crater = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private float[] stars = new float[0];
++        private boolean moon, solstice;
++        private float moonX, moonY, moonR;
++
++        WinterSky(Context c) {
++            super(c);
++            glint.setStrokeCap(Paint.Cap.ROUND);
++        }
++
++        /** moon: a big low moon (Christmas Eve's near-full supermoon); solstice: the darkest sky, twice the stars. */
++        void setNight(boolean moon, boolean solstice) {
++            this.moon = moon;
++            this.solstice = solstice;
++            build(getWidth(), getHeight());
++            invalidate();
++        }
++
++        PointF moonCentre() {
++            return moon ? new PointF(moonX, moonY) : null;
++        }
++
++        float moonRadius() {
++            return moonR;
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            build(w, h);
++        }
++
++        private void build(int w, int h) {
++            if (w == 0 || h == 0) return;
++            int[] colors = solstice
++                    ? new int[]{0xFF02050C, 0xFF050C1C, 0xFF0B1730, 0xFF081126}
++                    : new int[]{0xFF040913, 0xFF08122A, 0xFF10203E, 0xFF0B1630};
++            grad.setShader(new LinearGradient(0, 0, 0, h, colors, new float[]{0f, 0.35f, 0.7f, 1f},
++                    Shader.TileMode.CLAMP));
++            // a warm breath of light where the tree stands, so it seems to light the room
++            warm.setShader(new RadialGradient(w * 0.81f, h * 0.6f, w * 0.34f,
++                    new int[]{0x22FFB45A, 0x0EFFB45A, 0x00FFB45A}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
++            Random rnd = new Random(solstice ? 0x5017L : 0x57A2L);
++            int n = solstice ? 260 : 150;
++            stars = new float[n * 4];
++            for (int i = 0; i < n; i++) {
++                float y = (float) Math.pow(rnd.nextFloat(), 1.5) * h * 0.8f;
++                stars[i * 4] = rnd.nextFloat() * w;
++                stars[i * 4 + 1] = y;
++                stars[i * 4 + 2] = dp(0.45f + rnd.nextFloat() * (rnd.nextInt(9) == 0 ? 1.1f : 0.6f));
++                stars[i * 4 + 3] = 50 + rnd.nextInt(170) * (1f - y / h * 0.6f);
++            }
++            moonR = dp(30);
++            moonX = w * 0.53f;
++            moonY = h * 0.3f;
++            moonHalo.setShader(new RadialGradient(moonX, moonY, moonR * 4.2f,
++                    new int[]{0x66FFF6DA, 0x2AFFF0C8, 0x0DFFF0C8, 0x00FFF0C8}, new float[]{0f, 0.28f, 0.55f, 1f},
++                    Shader.TileMode.CLAMP));
++            moonFace.setShader(new RadialGradient(moonX - moonR * 0.25f, moonY - moonR * 0.3f, moonR * 1.25f,
++                    new int[]{0xFFFFFEF6, 0xFFF4EDD6, 0xFFDCD2B2}, new float[]{0f, 0.6f, 1f}, Shader.TileMode.CLAMP));
++            crater.setColor(0x33A89C78);
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            int w = getWidth(), h = getHeight();
++            c.drawRect(0, 0, w, h, grad);
++            c.drawRect(0, 0, w, h, warm);
++            for (int i = 0; i < stars.length; i += 4) {
++                star.setColor(0xFFFFFFFF);
++                star.setAlpha(Math.round(stars[i + 3]));
++                c.drawCircle(stars[i], stars[i + 1], stars[i + 2], star);
++                if (stars[i + 2] > dp(1.45f)) {   // the very brightest get a faint glint
++                    glint.setColor(0x33FFFFFF);
++                    glint.setStrokeWidth(dp(0.4f));
++                    float g = stars[i + 2] * 2.2f;
++                    c.drawLine(stars[i] - g, stars[i + 1], stars[i] + g, stars[i + 1], glint);
++                    c.drawLine(stars[i], stars[i + 1] - g, stars[i], stars[i + 1] + g, glint);
++                }
++            }
++            if (moon) {
++                c.drawCircle(moonX, moonY, moonR * 4.2f, moonHalo);
++                c.drawCircle(moonX, moonY, moonR, moonFace);
++                float[][] spots = {{-0.32f, -0.18f, 0.24f}, {0.18f, -0.34f, 0.15f}, {0.3f, 0.12f, 0.22f},
++                        {-0.12f, 0.36f, 0.17f}, {-0.45f, 0.18f, 0.11f}, {0.05f, 0.02f, 0.1f}};
++                for (float[] s : spots) c.drawCircle(moonX + s[0] * moonR, moonY + s[1] * moonR, s[2] * moonR, crater);
++            }
++        }
++    }
++
++    // ---- fairy lights -----------------------------------------------------------------------------
++
++    static final int WARM = 0xFFFFD98A;
++    static final int[] MULTI = {0xFFFF5A64, 0xFFFFD25A, 0xFF52D68E, 0xFF5AAEFF, 0xFFFF9A48};
++
++    /** Fairy lights strung in shallow swags along the top edge: a dark wire and small warm bulbs. */
++    static final class LightString extends Still {
++        private final Paint wire = new Paint(Paint.ANTI_ALIAS_FLAG), cap = new Paint(Paint.ANTI_ALIAS_FLAG),
++                bulb = new Paint(Paint.ANTI_ALIAS_FLAG), halo = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final Path wirePath = new Path();
++        private final List<PointF> bulbs = new ArrayList<>();
++        private final RectF tmp = new RectF();
++        private float[] anchors = new float[0];
++        private float sag, top;
++        private boolean multi;
++
++        LightString(Context c) {
++            super(c);
++            wire.setStyle(Paint.Style.STROKE);
++            wire.setStrokeWidth(dp(1.4f));
++            wire.setColor(0xFF15241B);
++            cap.setColor(0xFF1E3326);
++        }
++
++        void setMulticolour(boolean multi) {
++            if (this.multi == multi) return;
++            this.multi = multi;
++            invalidate();
++        }
++
++        boolean multicolour() {
++            return multi;
++        }
++
++        /** The bulbs' centres in this view's pixels. */
++        List<PointF> bulbs() {
++            return bulbs;
++        }
++
++        int bulbColour(int i) {
++            return multi ? MULTI[i % MULTI.length] : WARM;
++        }
++
++        /** Where the wire is at x (this view's pixels). */
++        float wireY(float x) {
++            for (int i = 0; i + 1 < anchors.length; i++) {
++                if (x >= anchors[i] && x <= anchors[i + 1]) {
++                    float mid = (anchors[i] + anchors[i + 1]) / 2f, half = (anchors[i + 1] - anchors[i]) / 2f;
++                    float u = (x - mid) / half;
++                    return top + sag * (1f - u * u);
++                }
++            }
++            return top;
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            top = dp(2.5f);
++            sag = dp(15f);
++            int swags = Math.max(4, Math.round(w / dp(165)));
++            float from = -dp(14), to = w + dp(14);
++            anchors = new float[swags + 1];
++            for (int i = 0; i <= swags; i++) anchors[i] = from + (to - from) * i / swags;
++            wirePath.reset();
++            wirePath.moveTo(anchors[0], top);
++            for (int i = 0; i < swags; i++) {
++                float mid = (anchors[i] + anchors[i + 1]) / 2f;
++                // a quadratic through the swag's lowest point at mid: control point twice as deep
++                wirePath.quadTo(mid, top + 2 * sag, anchors[i + 1], top);
++            }
++            bulbs.clear();
++            float step = dp(21);
++            for (float x = anchors[0] + step * 0.6f; x < to; x += step) {
++                if (x < dp(4) || x > w - dp(4)) continue;
++                bulbs.add(new PointF(x, wireY(x) + dp(5.2f)));
++            }
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            c.drawPath(wirePath, wire);
++            int size = Math.round(dp(26));
++            for (int i = 0; i < bulbs.size(); i++) {
++                PointF p = bulbs.get(i);
++                int col = bulbColour(i);
++                Bitmap g = glow(size, col, 0.12f);
++                halo.setAlpha(150);
++                tmp.set(p.x - size / 2f, p.y - size / 2f, p.x + size / 2f, p.y + size / 2f);
++                c.drawBitmap(g, null, tmp, halo);
++                c.drawRect(p.x - dp(1.1f), p.y - dp(4.6f), p.x + dp(1.1f), p.y - dp(2.4f), cap);
++                bulb.setShader(new RadialGradient(p.x - dp(0.6f), p.y - dp(0.8f), dp(3.2f),
++                        new int[]{0xFFFFFFFF, col, darker(col)}, new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
++                c.drawOval(p.x - dp(1.9f), p.y - dp(2.6f), p.x + dp(1.9f), p.y + dp(2.8f), bulb);
++            }
++        }
++    }
++
++    static int darker(int c) {
++        int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
++        return 0xFF000000 | ((r * 3 / 5) << 16) | ((g * 3 / 5) << 8) | (b * 3 / 5);
++    }
++
++    // ---- tree -------------------------------------------------------------------------------------
++
++    static final int[] ORNAMENT = {0xFFC8142E, 0xFFE8B640, 0xFF8CC4EE, 0xFFDCE1E8, 0xFF1F8A5B, 0xFFC4587E};
++
++    /**
++     * A slim fir lit by a spiral of warm lights. From Advent it carries one more glass ornament each day (24 by
++     * Christmas Eve), a gold star from Christmas Eve and presents from Christmas morning. The view stands with its
++     * bottom edge on the dock.
++     */
++    static final class LightTree extends Still {
++        static final float W = 200, H = 240;
++        private final Paint foliage = new Paint(Paint.ANTI_ALIAS_FLAG), rimLight = new Paint(Paint.ANTI_ALIAS_FLAG),
++                shade = new Paint(Paint.ANTI_ALIAS_FLAG), trunk = new Paint(Paint.ANTI_ALIAS_FLAG),
++                roomGlow = new Paint(Paint.ANTI_ALIAS_FLAG), dim = new Paint(Paint.ANTI_ALIAS_FLAG),
++                lit = new Paint(Paint.ANTI_ALIAS_FLAG), halo = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final List<Path> tiers = new ArrayList<>();
++        private final List<float[]> lights = new ArrayList<>();   // x, y, front (1/0)
++        private final float[][] spots = new float[24][3];          // x, y, radius in the order they arrive
++        private final RectF tmp = new RectF();
++        private int ornaments;
++        private boolean star, presents;
++        private float cx, top, base;
++
++        LightTree(Context c) {
++            super(c);
++            trunk.setShader(null);
++            dim.setColor(0xFFE7C27A);
++            lit.setColor(0xFFFFF4DA);
++        }
++
++        void setState(int ornaments, boolean star, boolean presents) {
++            this.ornaments = Math.max(0, Math.min(24, ornaments));
++            this.star = star;
++            this.presents = presents;
++            invalidate();
++        }
++
++        int ornaments() {
++            return ornaments;
++        }
++
++        boolean hasStar() {
++            return star;
++        }
++
++        boolean hasPresents() {
++            return presents;
++        }
++
++        /** The lights on the side facing the room, in this view's pixels (laid out first). */
++        List<PointF> frontLights() {
++            List<PointF> out = new ArrayList<>();
++            for (float[] l : lights) if (l[2] != 0f) out.add(new PointF(l[0], l[1]));
++            return out;
++        }
++
++        /** Where ornament i (0-based, in arrival order) hangs, in this view's pixels, with its radius. */
++        float[] ornamentSpot(int i) {
++            return spots[Math.max(0, Math.min(23, i))];
++        }
++
++        /** The star's centre in this view's pixels. */
++        PointF starCentre() {
++            return new PointF(cx, top - dp(3));
++        }
++
++        /** Half the tree's width at height v (0 top, 1 bottom of the branches). */
++        private float half(float v) {
++            return dp(9) + v * dp(72);
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            cx = w / 2f;
++            top = dp(24);
++            base = dp(206);
++            tiers.clear();
++            float[][] spans = {{0f, 0.3f}, {0.18f, 0.54f}, {0.42f, 0.8f}, {0.66f, 1f}};
++            for (int k = 0; k < spans.length; k++) {
++                float v0 = spans[k][0], v1 = spans[k][1];
++                float y0 = top + v0 * (base - top), y1 = top + v1 * (base - top);
++                float h0 = k == 0 ? dp(1.5f) : half(v0) * 0.42f, h1 = half(v1) * 1.04f;
++                Path p = new Path();
++                p.moveTo(cx - h0, y0);
++                p.quadTo(cx - h0 - (h1 - h0) * 0.35f, (y0 + y1) / 2f, cx - h1, y1);
++                int scallops = 3 + k;
++                float sw = 2 * h1 / scallops;
++                for (int s = 0; s < scallops; s++) {
++                    float x0 = cx - h1 + s * sw;
++                    p.quadTo(x0 + sw / 2f, y1 + dp(5.5f), x0 + sw, y1);
++                }
++                p.quadTo(cx + h0 + (h1 - h0) * 0.35f, (y0 + y1) / 2f, cx + h0, y0);
++                p.close();
++                tiers.add(p);
++            }
++            foliage.setShader(new LinearGradient(0, top, 0, base + dp(6),
++                    new int[]{0xFF1C5636, 0xFF123F27, 0xFF0A2818}, null, Shader.TileMode.CLAMP));
++            rimLight.setShader(new RadialGradient(cx - dp(34), top + dp(70), dp(110),
++                    new int[]{0x5544A06A, 0x2244A06A, 0x0044A06A}, null, Shader.TileMode.CLAMP));
++            shade.setShader(new LinearGradient(cx - dp(10), 0, cx + dp(80), 0, new int[]{0x00000000, 0x55000000},
++                    null, Shader.TileMode.CLAMP));
++            trunk.setShader(new LinearGradient(cx - dp(7), 0, cx + dp(7), 0,
++                    new int[]{0xFF2A1A10, 0xFF5A3A22, 0xFF2A1A10}, null, Shader.TileMode.CLAMP));
++            roomGlow.setShader(new RadialGradient(cx, (top + base) / 2f + dp(10), dp(96),
++                    new int[]{0x26FFC46A, 0x0EFFC46A, 0x00FFC46A}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
++            lights.clear();
++            int n = 96;
++            for (int i = 0; i < n; i++) {
++                float t = 0.03f + 0.96f * i / (n - 1);
++                double th = t * Math.PI * 2 * 5.4 + 0.6;
++                float hw = half(t) * 0.9f;
++                float x = cx + hw * (float) Math.sin(th);
++                float y = top + t * (base - top) + dp(2.5f) * (float) Math.cos(th);
++                lights.add(new float[]{x, y, Math.cos(th) > -0.1 ? 1f : 0f});
++            }
++            int[] rows = {1, 2, 3, 4, 4, 5, 5};
++            float[] vs = {0.17f, 0.29f, 0.41f, 0.53f, 0.65f, 0.77f, 0.89f};
++            List<float[]> all = new ArrayList<>();
++            Random rnd = new Random(0xAD7E17L);
++            for (int r = 0; r < rows.length; r++) {
++                for (int j = 0; j < rows[r]; j++) {
++                    float u = rows[r] == 1 ? 0f : -0.72f + 1.44f * j / (rows[r] - 1);
++                    u += (r % 2 == 0 ? 0.08f : -0.08f) + (rnd.nextFloat() - 0.5f) * 0.1f;
++                    float v = vs[r] + (rnd.nextFloat() - 0.5f) * 0.03f;
++                    all.add(new float[]{cx + u * half(v), top + v * (base - top), dp(3.6f + 2.6f * v)});
++                }
++            }
++            // arrival order: spread out, never two neighbours on consecutive days
++            int[] order = {12, 3, 20, 7, 16, 0, 22, 10, 5, 18, 14, 1, 23, 8, 19, 4, 11, 21, 6, 15, 2, 17, 9, 13};
++            for (int i = 0; i < 24; i++) spots[i] = all.get(order[i]);
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            int w = getWidth(), h = getHeight();
++            c.drawCircle(cx, (top + base) / 2f + dp(10), dp(96), roomGlow);
++            c.drawRect(cx - dp(7), base - dp(8), cx + dp(7), h - dp(3), trunk);
++            for (Path p : tiers) {
++                c.drawPath(p, foliage);
++                c.drawPath(p, rimLight);
++                c.drawPath(p, shade);
++            }
++            int size = Math.round(dp(16));
++            for (float[] l : lights) {
++                if (l[2] != 0f) continue;
++                dim.setAlpha(90);
++                c.drawCircle(l[0], l[1], dp(1.0f), dim);
++            }
++            for (int i = 0; i < ornaments; i++) drawOrnament(c, spots[i][0], spots[i][1], spots[i][2], i, d);
++            for (float[] l : lights) {
++                if (l[2] == 0f) continue;
++                halo.setAlpha(170);
++                tmp.set(l[0] - size / 2f, l[1] - size / 2f, l[0] + size / 2f, l[1] + size / 2f);
++                c.drawBitmap(glow(size, 0xFFFFD27A, 0.1f), null, tmp, halo);
++                c.drawCircle(l[0], l[1], dp(1.35f), lit);
++            }
++            if (star) drawStar(c, cx, top - dp(3), dp(13), d);
++            if (presents) drawPresents(c, cx, h, 0f, d);
++        }
++
++        static void drawOrnament(Canvas c, float x, float y, float r, int i, float d) {
++            int col = ORNAMENT[i % ORNAMENT.length];
++            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++            p.setColor(0x55000000);
++            c.drawCircle(x + r * 0.18f, y + r * 0.28f, r * 1.02f, p);
++            p.setShader(new RadialGradient(x - r * 0.38f, y - r * 0.42f, r * 1.5f,
++                    new int[]{lighter(col), col, darker(col), 0xFF1A0B08}, new float[]{0f, 0.35f, 0.8f, 1f},
++                    Shader.TileMode.CLAMP));
++            c.drawCircle(x, y, r, p);
++            p.setShader(null);
++            p.setColor(0xFFD7B060);
++            c.drawRect(x - r * 0.3f, y - r - d * 1.6f, x + r * 0.3f, y - r + d * 0.4f, p);
++            p.setColor(0xC8FFFFFF);
++            c.drawOval(x - r * 0.62f, y - r * 0.6f, x - r * 0.12f, y - r * 0.22f, p);
++        }
++
++        static int lighter(int c) {
++            int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
++            return 0xFF000000 | ((r + (255 - r) / 2) << 16) | ((g + (255 - g) / 2) << 8) | (b + (255 - b) / 2);
++        }
++
++        static void drawStar(Canvas c, float x, float y, float r, float d) {
++            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++            p.setShader(new RadialGradient(x, y, r * 3.2f, new int[]{0x99FFE9A8, 0x33FFE9A8, 0x00FFE9A8},
++                    new float[]{0f, 0.4f, 1f}, Shader.TileMode.CLAMP));
++            c.drawCircle(x, y, r * 3.2f, p);
++            Path s = new Path();
++            for (int i = 0; i < 10; i++) {
++                double a = -Math.PI / 2 + i * Math.PI / 5;
++                float rr = i % 2 == 0 ? r : r * 0.43f;
++                float px = x + rr * (float) Math.cos(a), py = y + rr * (float) Math.sin(a);
++                if (i == 0) s.moveTo(px, py);
++                else s.lineTo(px, py);
++            }
++            s.close();
++            p.setShader(new RadialGradient(x - r * 0.3f, y - r * 0.35f, r * 1.3f,
++                    new int[]{0xFFFFF8DA, 0xFFF6CB57, 0xFFC4861C}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
++            c.drawPath(s, p);
++            p.setShader(null);
++            p.setStyle(Paint.Style.STROKE);
++            p.setStrokeWidth(d * 0.8f);
++            p.setStrokeJoin(Paint.Join.ROUND);
++            p.setColor(0xFF7A4D0E);
++            c.drawPath(s, p);
++        }
++
++        /**
++         * Three wrapped presents standing on bottom, around cx; lift raises them (for the moment they arrive).
++         */
++        static void drawPresents(Canvas c, float cx, float bottom, float lift, float d) {
++            float[][] boxes = {
++                    // left offset, width, height, body colour, ribbon colour
++                    {-86, 46, 30, 0xFFB3122E, 0xFFE8B640},
++                    {-22, 36, 40, 0xFF1F6B47, 0xFFD22A3A},
++                    {22, 32, 23, 0xFFE9ECF2, 0xFF3B6FB6},
++            };
++            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++            for (float[] b : boxes) {
++                float l = cx + b[0] * d, w = b[1] * d, h = b[2] * d, btm = bottom - d * 2 - lift;
++                int body = (int) (long) b[3], ribbon = (int) (long) b[4];
++                p.setShader(null);
++                p.setColor(0x44000000);
++                c.drawOval(l - d * 3, btm - d * 3, l + w + d * 3, btm + d * 3, p);
++                p.setShader(new LinearGradient(0, btm - h, 0, btm, new int[]{lighterBy(body, 0.18f), darker(body)},
++                        null, Shader.TileMode.CLAMP));
++                c.drawRect(l, btm - h, l + w, btm, p);
++                p.setShader(null);
++                p.setColor(lighterBy(body, 0.28f));
++                c.drawRect(l - d * 1.5f, btm - h - d * 1.5f, l + w + d * 1.5f, btm - h + d * 4f, p);
++                p.setColor(ribbon);
++                c.drawRect(l + w / 2f - d * 2.6f, btm - h - d * 1.5f, l + w / 2f + d * 2.6f, btm, p);
++                c.drawRect(l, btm - h * 0.55f - d * 2f, l + w, btm - h * 0.55f + d * 2f, p);
++                p.setColor(darker(ribbon));
++                float bx = l + w / 2f, by = btm - h - d * 1.5f;
++                c.save();
++                c.rotate(-28, bx, by);
++                c.drawOval(bx - d * 9, by - d * 4, bx, by + d * 1.5f, p);
++                c.restore();
++                c.save();
++                c.rotate(28, bx, by);
++                c.drawOval(bx, by - d * 4, bx + d * 9, by + d * 1.5f, p);
++                c.restore();
++                p.setColor(ribbon);
++                c.drawCircle(bx, by, d * 2.4f, p);
++            }
++        }
++    }
++
++    static int lighterBy(int c, float t) {
++        int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
++        return 0xFF000000 | ((int) (r + (255 - r) * t) << 16) | ((int) (g + (255 - g) * t) << 8)
++                | (int) (b + (255 - b) * t);
++    }
++
++    // ---- gnome ------------------------------------------------------------------------------------
++
++    /**
++     * A little Nordic gnome: a tall red hat over his eyes, a round nose, a white beard, green tunic, red mittens.
++     * SIT: sitting on an edge, boots dangling (his seat is at (17, 46) in a 34 x 52 box). PEEK: only his hat, nose,
++     * beard and mittens over an edge he hides behind (the edge at y 33 in a 34 x 36 box). SLEEP: sitting, hat
++     * slumped, a "z" or two above him.
++     */
++    static final class GnomeView extends Still {
++        static final int SIT = 0, PEEK = 1, SLEEP = 2;
++        static final float BOX_W = 34, SIT_H = 52, PEEK_H = 36, SEAT_Y = 46, EDGE_Y = 33;
++        private final Paint hat = new Paint(Paint.ANTI_ALIAS_FLAG), hatEdge = new Paint(Paint.ANTI_ALIAS_FLAG),
++                beard = new Paint(Paint.ANTI_ALIAS_FLAG), beardLine = new Paint(Paint.ANTI_ALIAS_FLAG),
++                nose = new Paint(Paint.ANTI_ALIAS_FLAG), tunic = new Paint(Paint.ANTI_ALIAS_FLAG),
++                mitten = new Paint(Paint.ANTI_ALIAS_FLAG), boot = new Paint(Paint.ANTI_ALIAS_FLAG),
++                leg = new Paint(Paint.ANTI_ALIAS_FLAG), pom = new Paint(Paint.ANTI_ALIAS_FLAG),
++                zz = new Paint(Paint.ANTI_ALIAS_FLAG), shadow = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Path hatPath = new Path(), beardPath = new Path();
++        private int pose = SIT;
++
++        GnomeView(Context c) {
++            super(c);
++            hat.setShader(new LinearGradient(4, 0, 30, 0, new int[]{0xFFE23A3A, 0xFFC0161F, 0xFF7E0C14}, null,
++                    Shader.TileMode.CLAMP));
++            hatEdge.setStyle(Paint.Style.STROKE);
++            hatEdge.setStrokeWidth(0.5f);
++            hatEdge.setColor(0xFF5A070D);
++            beard.setShader(new LinearGradient(0, 20, 0, 41, new int[]{0xFFFBF9F4, 0xFFEAE5DC, 0xFFC9C2B6}, null,
++                    Shader.TileMode.CLAMP));
++            beardLine.setStyle(Paint.Style.STROKE);
++            beardLine.setStrokeWidth(0.45f);
++            beardLine.setStrokeCap(Paint.Cap.ROUND);
++            beardLine.setColor(0x55A39A8C);
++            nose.setShader(new RadialGradient(16.2f, 21.8f, 4.4f, new int[]{0xFFFFD6C4, 0xFFF0A88E, 0xFFC97A62},
++                    new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP));
++            tunic.setShader(new LinearGradient(0, 32, 0, 47, new int[]{0xFF2A6448, 0xFF173D2B}, null,
++                    Shader.TileMode.CLAMP));
++            mitten.setColor(0xFFA8121D);
++            boot.setColor(0xFF3A2A20);
++            leg.setColor(0xFF4A505A);
++            pom.setShader(new RadialGradient(26.5f, 3.2f, 2.6f, new int[]{0xFFFFFFFF, 0xFFDAD6CE}, null,
++                    Shader.TileMode.CLAMP));
++            zz.setColor(0xCCE8F0FF);
++            zz.setFakeBoldText(true);
++            zz.setTextSize(7f);
++            shadow.setColor(0x33000000);
++            hatPath.moveTo(3.6f, 21.6f);
++            hatPath.cubicTo(6.5f, 13f, 11f, 5f, 18f, 2.6f);
++            hatPath.cubicTo(22f, 1.2f, 25.5f, 1.8f, 27f, 3.4f);
++            hatPath.cubicTo(24.4f, 4.4f, 22.6f, 6.4f, 22.4f, 9f);
++            hatPath.cubicTo(25.6f, 13f, 28.6f, 17.4f, 30.4f, 21.6f);
++            hatPath.cubicTo(21f, 23.4f, 13f, 23.4f, 3.6f, 21.6f);
++            hatPath.close();
++            beardPath.moveTo(4.2f, 21.2f);
++            beardPath.cubicTo(12f, 24.4f, 22f, 24.4f, 29.8f, 21.2f);
++            beardPath.cubicTo(31.6f, 29f, 28.6f, 35.6f, 24f, 38.6f);
++            beardPath.cubicTo(21.4f, 40.6f, 19f, 39.4f, 17f, 41.2f);
++            beardPath.cubicTo(15f, 39.4f, 12.6f, 40.6f, 10f, 38.6f);
++            beardPath.cubicTo(5.4f, 35.6f, 2.4f, 29f, 4.2f, 21.2f);
++            beardPath.close();
++        }
++
++        void setPose(int pose) {
++            if (this.pose == pose) return;
++            this.pose = pose;
++            requestLayout();
++            invalidate();
++        }
++
++        int pose() {
++            return pose;
++        }
++
++        /** Size in pixels for a pose. */
++        int widthPx() {
++            return Math.round(dp(BOX_W));
++        }
++
++        int heightPx() {
++            return Math.round(dp(pose == PEEK ? PEEK_H : SIT_H));
++        }
++
++        /** Where his seat (or, peeking, the edge) is, from the view's top left, in pixels. */
++        float anchorY() {
++            return dp(pose == PEEK ? EDGE_Y : SEAT_Y);
++        }
++
++        @Override
++        protected void onMeasure(int wSpec, int hSpec) {
++            setMeasuredDimension(widthPx(), heightPx());
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            int save = c.save();
++            c.scale(d, d);
++            if (pose == SLEEP) c.rotate(-6f, 17f, 46f);
++            if (pose != PEEK) {
++                c.drawOval(5f, 45.5f, 29f, 48.5f, shadow);
++                c.drawRect(9.6f, 43f, 13.2f, 48.6f, leg);
++                c.drawRect(20.8f, 43f, 24.4f, 48.6f, leg);
++                c.drawOval(6.6f, 47.2f, 14.6f, 51.6f, boot);
++                c.drawOval(19.4f, 47.2f, 27.4f, 51.6f, boot);
++                c.drawRoundRect(6.4f, 31f, 27.6f, 46f, 6f, 6f, tunic);
++                c.drawOval(2.6f, 35.6f, 8.6f, 41.2f, mitten);
++                c.drawOval(25.4f, 35.6f, 31.4f, 41.2f, mitten);
++            }
++            c.drawPath(beardPath, beard);
++            c.drawLine(12f, 27f, 11.2f, 35f, beardLine);
++            c.drawLine(17f, 27.6f, 17f, 38f, beardLine);
++            c.drawLine(22f, 27f, 22.8f, 35f, beardLine);
++            if (pose == SLEEP) {
++                c.save();
++                c.rotate(10f, 16f, 22f);
++            }
++            c.drawPath(hatPath, hat);
++            c.drawPath(hatPath, hatEdge);
++            c.drawCircle(26.5f, 3.2f, 2.3f, pom);
++            if (pose == SLEEP) c.restore();
++            c.drawCircle(16.4f, 22.6f, 3.6f, nose);
++            if (pose == PEEK) {
++                c.drawOval(3.2f, 30.2f, 10.2f, 35.4f, mitten);
++                c.drawOval(23.8f, 30.2f, 30.8f, 35.4f, mitten);
++            }
++            if (pose == SLEEP) {
++                c.drawText("z", 29f, 8f, zz);
++                zz.setTextSize(5f);
++                c.drawText("z", 32f, 2.5f, zz);
++                zz.setTextSize(7f);
++            }
++            c.restoreToCount(save);
++        }
++    }
++
++    // ---- cardinal ---------------------------------------------------------------------------------
++
++    /** A male northern cardinal perched on a wire, facing left: red, crested, black mask, orange beak. */
++    static final class CardinalView extends Still {
++        static final float BOX_W = 30, BOX_H = 26, FOOT_Y = 24;
++        private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG), wing = new Paint(Paint.ANTI_ALIAS_FLAG),
++                mask = new Paint(Paint.ANTI_ALIAS_FLAG), beak = new Paint(Paint.ANTI_ALIAS_FLAG),
++                eye = new Paint(Paint.ANTI_ALIAS_FLAG), feet = new Paint(Paint.ANTI_ALIAS_FLAG),
++                line = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Path bodyPath = new Path(), wingPath = new Path(), tailPath = new Path(), maskPath = new Path(),
++                beakPath = new Path(), crestPath = new Path();
++
++        CardinalView(Context c) {
++            super(c);
++            body.setShader(new LinearGradient(4, 4, 24, 22, new int[]{0xFFF0354A, 0xFFC8102E, 0xFF84091F}, null,
++                    Shader.TileMode.CLAMP));
++            wing.setColor(0xFF9A0C22);
++            mask.setColor(0xFF1A1414);
++            beak.setColor(0xFFF07A3A);
++            eye.setColor(0xFF000000);
++            feet.setStyle(Paint.Style.STROKE);
++            feet.setStrokeWidth(0.8f);
++            feet.setStrokeCap(Paint.Cap.ROUND);
++            feet.setColor(0xFF6A4A3A);
++            line.setStyle(Paint.Style.STROKE);
++            line.setStrokeWidth(0.5f);
++            line.setColor(0x66500612);
++            bodyPath.moveTo(7f, 8f);
++            bodyPath.cubicTo(7f, 4.5f, 11f, 3.6f, 13f, 6.4f);
++            bodyPath.cubicTo(18f, 8.2f, 22f, 12f, 22.5f, 16.6f);
++            bodyPath.cubicTo(22.6f, 20.4f, 18f, 23.2f, 13.2f, 22.2f);
++            bodyPath.cubicTo(8.6f, 21f, 6.2f, 16f, 6.4f, 12f);
++            bodyPath.cubicTo(6.4f, 10.4f, 6.6f, 9f, 7f, 8f);
++            bodyPath.close();
++            crestPath.moveTo(8f, 6f);
++            crestPath.lineTo(13.6f, 0.6f);
++            crestPath.lineTo(12.6f, 6.8f);
++            crestPath.close();
++            wingPath.moveTo(12.6f, 11.6f);
++            wingPath.cubicTo(17.6f, 11f, 22f, 14.6f, 25f, 18.6f);
++            wingPath.cubicTo(20f, 19.4f, 14.6f, 18.4f, 12.6f, 11.6f);
++            wingPath.close();
++            tailPath.moveTo(20.6f, 16.6f);
++            tailPath.lineTo(29.4f, 24.4f);
++            tailPath.lineTo(26.6f, 25.4f);
++            tailPath.lineTo(18.6f, 19.4f);
++            tailPath.close();
++            maskPath.moveTo(4.4f, 8.6f);
++            maskPath.cubicTo(6.2f, 7f, 9.6f, 7.6f, 10.4f, 9.4f);
++            maskPath.cubicTo(10f, 11.8f, 8f, 13.6f, 6f, 13.2f);
++            maskPath.cubicTo(5f, 12f, 4.4f, 10.4f, 4.4f, 8.6f);
++            maskPath.close();
++            beakPath.moveTo(5.6f, 9.2f);
++            beakPath.lineTo(1.2f, 10.8f);
++            beakPath.lineTo(5.8f, 12.4f);
++            beakPath.close();
++        }
++
++        @Override
++        protected void onMeasure(int wSpec, int hSpec) {
++            setMeasuredDimension(Math.round(dp(BOX_W)), Math.round(dp(BOX_H)));
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            int save = c.save();
++            c.scale(d, d);
++            c.drawPath(tailPath, wing);
++            c.drawPath(crestPath, body);
++            c.drawPath(bodyPath, body);
++            c.drawPath(wingPath, wing);
++            c.drawLine(15f, 14f, 21f, 17.4f, line);
++            c.drawPath(maskPath, mask);
++            c.drawPath(beakPath, beak);
++            c.drawCircle(8.4f, 9.6f, 0.7f, eye);
++            c.drawLine(12.4f, 22f, 12f, 24.4f, feet);
++            c.drawLine(15f, 22.4f, 15.2f, 24.4f, feet);
++            c.restoreToCount(save);
++        }
++    }
++
++    // ---- frost ------------------------------------------------------------------------------------
++
++    /** Frost feathering in from the four corners, for mornings below zero. */
++    static final class FrostView extends Still {
++        private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG), mist = new Paint(Paint.ANTI_ALIAS_FLAG);
++
++        FrostView(Context c) {
++            super(c);
++            line.setStyle(Paint.Style.STROKE);
++            line.setStrokeCap(Paint.Cap.ROUND);
++            line.setColor(0xFFE8F4FF);
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            int w = getWidth(), h = getHeight();
++            float[][] corners = {{0, 0, 1, 1}, {w, 0, -1, 1}, {0, h, 1, -1}, {w, h, -1, -1}};
++            Random rnd = new Random(0xF205L);
++            for (float[] k : corners) {
++                mist.setShader(new RadialGradient(k[0], k[1], dp(190), new int[]{0x40DCEBFF, 0x14DCEBFF, 0x00DCEBFF},
++                        null, Shader.TileMode.CLAMP));
++                c.drawCircle(k[0], k[1], dp(190), mist);
++                for (int i = 0; i < 9; i++) {
++                    double a = Math.toRadians(5 + 80 * rnd.nextFloat());
++                    branch(c, k[0], k[1], (float) Math.cos(a) * k[2], (float) Math.sin(a) * k[3], dp(70 + rnd.nextInt(90)),
++                            3, rnd);
++                }
++            }
++        }
++
++        private void branch(Canvas c, float x, float y, float ux, float uy, float len, int depth, Random rnd) {
++            float ex = x + ux * len, ey = y + uy * len;
++            line.setStrokeWidth(dp(0.5f + depth * 0.35f));
++            line.setAlpha(40 + depth * 28);
++            c.drawLine(x, y, ex, ey, line);
++            if (depth == 0) return;
++            int kids = 3 + rnd.nextInt(3);
++            for (int i = 1; i <= kids; i++) {
++                float t = i / (float) (kids + 1);
++                float bx = x + ux * len * t, by = y + uy * len * t;
++                double a = Math.atan2(uy, ux) + (i % 2 == 0 ? 1 : -1) * Math.toRadians(50 + rnd.nextInt(20));
++                branch(c, bx, by, (float) Math.cos(a), (float) Math.sin(a), len * (0.32f + rnd.nextFloat() * 0.18f),
++                        depth - 1, rnd);
++            }
++        }
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/HolidayDecor.java b/launcher/app/src/main/java/com/gathin/tvhome/HolidayDecor.java
+new file mode 100644
+index 0000000..f326a62
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/HolidayDecor.java
+@@ -0,0 +1,1083 @@
++package com.gathin.tvhome;
++
++import android.animation.Animator;
++import android.animation.AnimatorListenerAdapter;
++import android.animation.ObjectAnimator;
++import android.animation.TimeAnimator;
++import android.animation.ValueAnimator;
++import android.app.Activity;
++import android.content.Context;
++import android.content.SharedPreferences;
++import android.graphics.Bitmap;
++import android.graphics.Canvas;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.graphics.PointF;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.graphics.drawable.BitmapDrawable;
++import android.os.Handler;
++import android.os.Looper;
++import android.os.SystemClock;
++import android.util.DisplayMetrics;
++import android.view.Gravity;
++import android.view.View;
++import android.view.ViewGroup;
++import android.view.animation.OvershootInterpolator;
++import android.widget.FrameLayout;
++import android.widget.TextView;
++
++import androidx.annotation.NonNull;
++import androidx.recyclerview.widget.RecyclerView;
++
++import java.time.Duration;
++import java.time.Instant;
++import java.time.LocalDate;
++import java.time.LocalTime;
++import java.time.ZoneId;
++import java.time.ZoneOffset;
++import java.time.ZonedDateTime;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Locale;
++import java.util.Random;
++
++/**
++ * bravia: the Christmas season on Home, while a theme's festival is "christmas". Pieces are switched on by name
++ * in festival_decor: "sky" (a winter night with stars, a moon on some nights), "snow" (snowfall, heavier when
++ * Home Assistant says it's snowing), "lights" (fairy lights along the top), "tree" (from festival_tree_from: one
++ * more ornament a day from 1 December, a star from the 24th, presents from the 25th), "gnome" (hiding somewhere
++ * new each day, festival_calendar's "gnome"; he hops away when you land on his tile), "snowcaps" (snow on the
++ * dock's tiles that falls off as you move across them), "weather" (frost in the corners below zero) and
++ * "moments" (the day's moment, played the first time Home opens that day).
++ *
++ * festival_calendar gives each day a "moment" (names joined with "+"), a "gnome" spot ("tile:2", "pill:settings",
++ * "date", "tree", "dock:left", "dock:right"), a "sky" ("moon", "solstice", "meteors")
++ * and a "style" ("multicolour", "sweater", "santa", "holiday", joined with "+").
++ *
++ * Calm by design: everything still is drawn once into a hardware layer; the only steady motion is the snow and a
++ * few twinkling bulbs, all moved as view properties. Nothing takes focus; any key ends a moment at once; reduced
++ * motion keeps the scene and stills it. Back on Home shakes the snow globe.
++ */
++final class HolidayDecor {
++    private static final String PREFS = "bravia_holiday", LAST_MOMENT = "last_moment_day";
++    private static final long SHAKE_GAP_MS = 4000;
++
++    private final Activity activity;
++    private final FrameLayout root;
++    private final Festival festival;
++    private final Festival.Day plan;
++    private final LocalDate day;
++    private final boolean reduced;
++    private final float d;
++    private final int screenW, screenH;
++    private final Handler handler = new Handler(Looper.getMainLooper());
++    private final RecyclerView grid;
++    private final int columns;
++
++    private HolidayArt.WinterSky sky;
++    private HolidayArt.LightString lights;
++    private final List<View> twinkles = new ArrayList<>();
++    private final List<ObjectAnimator> loops = new ArrayList<>();
++    private FrameLayout treeBox;
++    private HolidayArt.LightTree tree;
++    private boolean treeTwinklesPlaced, lightTwinklesPlaced;
++    private HolidayArt.GnomeView gnome;
++    private String gnomeSpot = "";
++    private boolean gnomeShown, gnomeHopping;
++    private HolidayArt.CardinalView cardinal;
++    private boolean cardinalLanded;
++    private HolidayArt.FrostView frost;
++    private Snow snow;
++    private SnowCaps caps;
++    private HolidayMoments.Moment moment;
++    private List<String> queue = new ArrayList<>();
++    private boolean pendingFirst, started, snowing, cold;
++    private RectF band;
++    private boolean dockAtRest = true;
++    private long lastShake;
++    private final Runnable meteor = this::meteor;
++
++    HolidayDecor(Activity activity, FrameLayout root, Festival festival, boolean reducedMotion, View behind,
++                 View content, RecyclerView grid, int columns) {
++        this.activity = activity;
++        this.root = root;
++        this.festival = festival;
++        this.reduced = reducedMotion;
++        this.grid = grid;
++        this.columns = columns;
++        day = festival.today();
++        plan = festival.day(day);
++        DisplayMetrics m = activity.getResources().getDisplayMetrics();
++        d = m.density;
++        screenW = m.widthPixels;
++        screenH = m.heightPixels;
++        SharedPreferences prefs = activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
++        pendingFirst = !reduced && festival.decor("moments") && festival.previewMoment.isEmpty()
++                && !momentKey().equals(prefs.getString(LAST_MOMENT, ""));
++        List<String> today = moments();
++
++        int at = root.indexOfChild(behind) + 1;
++        if (festival.decor("sky")) {
++            sky = new HolidayArt.WinterSky(activity);
++            sky.setNight(hasWord(plan.sky, "moon"), hasWord(plan.sky, "solstice"));
++            root.addView(sky, at++, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.MATCH_PARENT));
++        }
++        if (festival.decor("snow") && !reduced) snow = new Snow(at);
++        if (snow != null) at += snow.behindCount;
++        if (festival.decor("tree") && festival.treeFrom != null && !day.isBefore(festival.treeFrom)) {
++            tree = new HolidayArt.LightTree(activity);
++            int ornaments = ornaments(day), before = ornaments;
++            boolean star = !day.isBefore(seasonDate(12, 24)), presents = !day.isBefore(seasonDate(12, 25));
++            if (pendingFirst && ornaments > 0 && day.getMonthValue() == 12 && day.getDayOfMonth() <= 24) before--;
++            tree.setState(before, star && !(pendingFirst && today.contains("star")),
++                    presents && !(pendingFirst && today.contains("presents")));
++            treeBox = new FrameLayout(activity);
++            treeBox.addView(tree, new FrameLayout.LayoutParams(dpi(HolidayArt.LightTree.W), dpi(HolidayArt.LightTree.H)));
++            HolidayArt.quiet(treeBox);
++            root.addView(treeBox, Math.max(0, root.indexOfChild(content)),
++                    new FrameLayout.LayoutParams(dpi(HolidayArt.LightTree.W), dpi(HolidayArt.LightTree.H),
++                            Gravity.TOP | Gravity.LEFT));
++            if (pendingFirst && today.contains("tree_arrives")) treeBox.setAlpha(0f);
++        }
++        if (festival.decor("lights")) {
++            lights = new HolidayArt.LightString(activity);
++            lights.setMulticolour(hasWord(plan.style, "multicolour"));
++            root.addView(lights, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpi(48), Gravity.TOP));
++            if (pendingFirst && today.contains("lights_on")) lights.setAlpha(0f);
++        }
++        if (snow != null) snow.frame(0f);   // flakes only behind Home's text and tiles: in front they read as smudges
++        if (festival.decor("weather")) {
++            frost = new HolidayArt.FrostView(activity);
++            frost.setVisibility(View.GONE);
++            root.addView(frost, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                    ViewGroup.LayoutParams.MATCH_PARENT));
++        }
++        if (festival.decor("gnome") && !plan.gnome.isEmpty()) {
++            gnome = new HolidayArt.GnomeView(activity);
++            gnomeSpot = plan.gnome;
++            gnome.setPose(gnomeSpot.startsWith("dock:") ? HolidayArt.GnomeView.PEEK
++                    : hasWord(plan.style, "holiday") ? HolidayArt.GnomeView.SLEEP : HolidayArt.GnomeView.SIT);
++            gnome.setAlpha(0f);
++            root.addView(gnome, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.LEFT));
++            gnomeShown = !(pendingFirst && today.contains("gnome_arrives"));
++        }
++        if (grid != null && today.contains("cardinal")) {
++            cardinal = new HolidayArt.CardinalView(activity);
++            cardinal.setAlpha(0f);
++            root.addView(cardinal, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
++                    ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.LEFT));
++            cardinalLanded = !pendingFirst;
++        }
++        if (festival.decor("snowcaps") && grid != null) {
++            caps = new SnowCaps();
++            grid.addItemDecoration(caps);
++        }
++        if (!festival.previewMoment.isEmpty()) root.post(this::preview);
++    }
++
++    /** Today's moment plays once per day and per theme content (Festival.signature). */
++    private String momentKey() {
++        return day + "#" + festival.signature;
++    }
++
++    /** The day this was built for; Home rebuilds when it changes. */
++    LocalDate day() {
++        return day;
++    }
++
++    /** Ugly Sweater Day: the pills go knitted. */
++    boolean sweater() {
++        return hasWord(plan.style, "sweater");
++    }
++
++    private int dpi(float v) {
++        return Math.round(v * d);
++    }
++
++    private static boolean hasWord(String list, String word) {
++        if (list == null || list.isEmpty()) return false;
++        for (String s : list.split("\\+")) if (s.equals(word)) return true;
++        return false;
++    }
++
++    private List<String> moments() {
++        List<String> out = new ArrayList<>();
++        if (festival.decor("tree") && festival.treeFrom != null && !day.isBefore(festival.treeFrom)
++                && day.getMonthValue() == 12 && day.getDayOfMonth() <= 24) out.add("ornament");
++        if (!plan.moment.isEmpty()) out.addAll(Arrays.asList(plan.moment.split("\\+")));
++        return out;
++    }
++
++    /** A date in this season's December (or the January after it). */
++    private LocalDate seasonDate(int month, int dayOfMonth) {
++        int year = day.getMonthValue() == 1 ? day.getYear() - 1 : day.getYear();
++        return LocalDate.of(month == 1 ? year + 1 : year, month, dayOfMonth);
++    }
++
++    /** Ornaments on the tree: one per day of Advent, 1 on 1 December up to 24 on Christmas Eve. */
++    private int ornaments(LocalDate date) {
++        LocalDate start = seasonDate(12, 1);
++        if (date.isBefore(start)) return 0;
++        return (int) Math.min(24, Duration.between(start.atStartOfDay(), date.atStartOfDay()).toDays() + 1);
++    }
++
++    // ---- life cycle -------------------------------------------------------------------------------
++
++    void start() {
++        started = true;
++        if (reduced) return;
++        if (snow != null) snow.start();
++        for (ObjectAnimator a : loops) {
++            if (a.isStarted()) a.resume();
++            else a.start();
++        }
++        if (caps != null) caps.resume();
++        handler.removeCallbacks(meteor);
++        if (hasWord(plan.sky, "meteors")) handler.postDelayed(meteor, 4000);
++    }
++
++    void stop() {
++        started = false;
++        if (snow != null) snow.stop();
++        for (ObjectAnimator a : loops) a.pause();
++        if (caps != null) caps.pause();
++        handler.removeCallbacks(meteor);
++        if (moment != null) moment.finishNow();
++    }
++
++    void release() {
++        stop();
++        for (ObjectAnimator a : loops) a.cancel();
++        handler.removeCallbacksAndMessages(null);
++    }
++
++    // ---- placement --------------------------------------------------------------------------------
++
++    /** The dock band in root's coordinates, or null when it has scrolled away. */
++    void onDockBand(RectF band) {
++        this.band = band;
++        boolean rest = band != null && band.top > dpi(222);
++        if (rest != dockAtRest) {
++            dockAtRest = rest;
++            fadeWithDock(treeBox, 1f);
++            if (gnome != null && gnomeShown && dockSpot(gnomeSpot)) fadeWithDock(gnome, 1f);
++            if (cardinal != null && cardinalLanded) fadeWithDock(cardinal, 1f);
++        }
++        place();
++    }
++
++    private void fadeWithDock(View v, float full) {
++        if (v == null) return;
++        v.animate().alpha(dockAtRest ? full : 0f).setDuration(reduced ? 0 : 220).start();
++    }
++
++    private static boolean dockSpot(String spot) {
++        return spot.startsWith("tile:") || spot.startsWith("dock:") || spot.equals("tree");
++    }
++
++    private float bandTop() {
++        return band != null ? band.top : screenH - 193 * d;
++    }
++
++    /** Puts the tree, the gnome, the bird and the twinkles where the layout now has room for them. */
++    void place() {
++        if (root.getWidth() == 0) return;
++        if (treeBox != null) {
++            float cx = root.getWidth() - dpi(182);
++            treeBox.setX(cx - dpi(HolidayArt.LightTree.W) / 2f);
++            treeBox.setY(bandTop() + dpi(7) - dpi(HolidayArt.LightTree.H));
++            if (!treeTwinklesPlaced && tree.getWidth() > 0 && !reduced) {
++                treeTwinklesPlaced = true;
++                List<PointF> front = tree.frontLights();
++                Random rnd = new Random(0x7EEL);
++                for (int i = 0; i < 7 && !front.isEmpty(); i++) {
++                    PointF p = front.get(rnd.nextInt(front.size()));
++                    addTwinkle(treeBox, p.x, p.y, 0xFFFFE2A0, dpi(22), rnd);
++                }
++            }
++        }
++        if (lights != null && !lightTwinklesPlaced && lights.getWidth() > 0 && !reduced) {
++            lightTwinklesPlaced = true;
++            List<PointF> bulbs = lights.bulbs();
++            Random rnd = new Random(0x1197L);
++            for (int i = 0; i < 9 && !bulbs.isEmpty(); i++) {
++                int k = rnd.nextInt(bulbs.size());
++                PointF p = bulbs.get(k);
++                addTwinkle(root, p.x, p.y, lights.bulbColour(k), dpi(30), rnd);
++            }
++        }
++        if (cardinal != null && cardinal.getWidth() > 0 && cardinalLanded) {
++            PointF perch = perch();
++            if (perch != null) {
++                cardinal.setX(perch.x - cardinal.getWidth() / 2f);
++                cardinal.setY(perch.y - cardinal.getHeight() * (HolidayArt.CardinalView.FOOT_Y / HolidayArt.CardinalView.BOX_H));
++                cardinal.setAlpha(dockAtRest ? 1f : 0f);
++            }
++        }
++        if (gnome != null && gnome.getWidth() > 0 && !gnomeHopping) {
++            PointF seat = seat(gnomeSpot);
++            if (seat == null) {
++                gnome.setAlpha(0f);
++            } else {
++                gnome.setX(seat.x - gnome.getWidth() / 2f);
++                gnome.setY(seat.y - gnome.anchorY());
++                if (gnomeShown) gnome.setAlpha(dockSpot(gnomeSpot) && !dockAtRest ? 0f : 1f);
++            }
++        }
++    }
++
++    private void addTwinkle(FrameLayout parent, float x, float y, int color, int size, Random rnd) {
++        View v = new View(activity);
++        v.setBackground(new BitmapDrawable(activity.getResources(), HolidayArt.glow(size, color, 0.14f)));
++        HolidayArt.quiet(v);
++        v.setAlpha(0f);
++        parent.addView(v, new FrameLayout.LayoutParams(size, size, Gravity.TOP | Gravity.LEFT));
++        v.setX(x - size / 2f);
++        v.setY(y - size / 2f);
++        ObjectAnimator a = ObjectAnimator.ofFloat(v, "alpha", 0f, 0.95f);
++        a.setDuration(1300 + rnd.nextInt(1500));   // well under three flashes a second
++        a.setStartDelay(rnd.nextInt(2400));
++        a.setRepeatCount(ValueAnimator.INFINITE);
++        a.setRepeatMode(ValueAnimator.REVERSE);
++        loops.add(a);
++        if (started) a.start();
++    }
++
++    private RectF boundsInRoot(View v) {
++        int[] a = new int[2], b = new int[2];
++        v.getLocationInWindow(a);
++        root.getLocationInWindow(b);
++        float x = a[0] - b[0], y = a[1] - b[1];
++        return new RectF(x, y, x + v.getWidth(), y + v.getHeight());
++    }
++
++    /** Where the cardinal stands: on the snow at the right end of the dock's last tile. */
++    private PointF perch() {
++        View card = tileCard(columns - 1);
++        if (card == null || card.getWidth() == 0) return null;
++        RectF b = boundsInRoot(card);
++        return new PointF(b.right - dpi(30), b.top - dpi(4));
++    }
++
++    private View tileCard(int position) {
++        if (grid == null) return null;
++        RecyclerView.ViewHolder h = grid.findViewHolderForAdapterPosition(position);
++        return h == null ? null : h.itemView.findViewById(R.id.card);
++    }
++
++    private View pill(String name) {
++        switch (name) {
++            case "inputs":
++                return activity.findViewById(R.id.btnInputs);
++            case "wifi":
++                return activity.findViewById(R.id.btnWifi);
++            case "settings":
++                return activity.findViewById(R.id.btnSettings);
++            default:
++                return null;
++        }
++    }
++
++    /** Where the gnome sits (his seat, or the edge he peeks over) for a spot, in root's pixels; null if nowhere. */
++    private PointF seat(String spot) {
++        try {
++            if (spot.startsWith("tile:")) {
++                View card = tileCard(Integer.parseInt(spot.substring(5)));
++                if (card == null || card.getWidth() == 0) return null;
++                RectF b = boundsInRoot(card);
++                return new PointF(b.centerX() + dpi(18), b.top + dpi(3));
++            }
++            if (spot.startsWith("pill:")) {
++                View p = pill(spot.substring(5));
++                if (p == null || p.getVisibility() != View.VISIBLE || p.getWidth() == 0) return null;
++                RectF b = boundsInRoot(p);
++                return new PointF(b.right - dpi(26), b.top + dpi(2));
++            }
++            if (spot.equals("date")) {
++                // sitting on the end of the date line, clear of the greeting above and the pills to the right
++                TextView t = activity.findViewById(R.id.date);
++                if (t == null || t.getLayout() == null || t.getWidth() == 0) return null;
++                RectF b = boundsInRoot(t);
++                float right = b.left + t.getPaddingLeft() + t.getLayout().getLineWidth(0);
++                float capTop = b.top + t.getBaseline() - t.getTextSize() * 0.72f;
++                return new PointF(right - dpi(30), capTop + dpi(1));
++            }
++            if (spot.startsWith("lights:") && lights != null && lights.getWidth() > 0) {
++                float x = Float.parseFloat(spot.substring(7)) * lights.getWidth();
++                return new PointF(x, lights.wireY(x) + dpi(1));
++            }
++            if (spot.equals("tree") && treeBox != null) {
++                // to the right of the presents, at the foot of the tree
++                return new PointF(treeBox.getX() + dpi(176), bandTop() + dpi(2));
++            }
++            if (spot.startsWith("dock:") && band != null) {
++                boolean left = spot.equals("dock:left");
++                return new PointF(left ? band.left + dpi(40) : band.right - dpi(40), band.top + dpi(1));
++            }
++        } catch (NumberFormatException ignored) {
++            // a malformed spot: nowhere
++        }
++        return null;
++    }
++
++    // ---- focus: the gnome hops away, snow falls off tiles -------------------------------------------
++
++    void onFocus(View focused) {
++        int position = -1;
++        if (focused != null && grid != null) {
++            View item = focused;
++            while (item != null && item.getParent() != grid) {
++                item = item.getParent() instanceof View ? (View) item.getParent() : null;
++            }
++            if (item != null) position = grid.getChildAdapterPosition(item);
++        }
++        if (caps != null) caps.setFocused(position >= 0 && position < columns ? position : -1);
++        if (gnome == null || !gnomeShown || gnomeHopping) return;
++        if (position >= 0 && gnomeSpot.equals("tile:" + position)) {
++            int next = position + 1 < columns ? position + 1 : position - 1;
++            if (next >= 0) hop("tile:" + next);
++            return;
++        }
++        String[] pills = {"inputs", "wifi", "settings"};
++        for (int i = 0; i < pills.length; i++) {
++            if (focused != null && focused == pill(pills[i]) && gnomeSpot.equals("pill:" + pills[i])) {
++                hop("pill:" + pills[i == pills.length - 1 ? i - 1 : i + 1]);
++                return;
++            }
++        }
++    }
++
++    private void hop(String to) {
++        PointF target = seat(to);
++        if (target == null) return;
++        gnomeSpot = to;
++        float x0 = gnome.getX(), y0 = gnome.getY();
++        float x1 = target.x - gnome.getWidth() / 2f, y1 = target.y - gnome.anchorY();
++        if (reduced) {
++            gnome.setX(x1);
++            gnome.setY(y1);
++            return;
++        }
++        gnomeHopping = true;
++        ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
++        a.setDuration(560);
++        a.addUpdateListener(v -> {
++            float t = (float) v.getAnimatedValue();
++            gnome.setX(x0 + (x1 - x0) * t);
++            gnome.setY(y0 + (y1 - y0) * t - dpi(46) * (float) Math.sin(Math.PI * t));
++            gnome.setRotation((x1 > x0 ? 1 : -1) * 14f * (float) Math.sin(Math.PI * t));
++        });
++        a.addListener(new AnimatorListenerAdapter() {
++            @Override
++            public void onAnimationEnd(Animator animation) {
++                gnomeHopping = false;
++                gnome.setRotation(0f);
++                gnome.setPivotY(gnome.getHeight());
++                gnome.setScaleY(0.86f);
++                gnome.animate().scaleY(1f).setDuration(220).setInterpolator(new OvershootInterpolator(3f)).start();
++            }
++        });
++        a.start();
++    }
++
++    // ---- moments ----------------------------------------------------------------------------------
++
++    /** The first time Home opens today: the day's moments, one after another. */
++    void firstVisit() {
++        place();
++        if (!pendingFirst || activity.isFinishing()) {
++            revealQuiet();
++            return;
++        }
++        // Only when Home really has the screen: resumed under the screensaver or the TV's screen-off overlay, the
++        // moment waits for the next time Home takes focus instead of playing to nobody.
++        if (!started || !activity.hasWindowFocus()) return;
++        pendingFirst = false;
++        activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(LAST_MOMENT, momentKey()).apply();
++        queue = moments();
++        next();
++    }
++
++    /** Shows whatever waits for a moment that won't play (reduced motion, or today's already played). */
++    private void revealQuiet() {
++        if (gnome != null && !gnomeShown) gnomeShown = true;
++        if (gnome != null && gnome.getAlpha() == 0f) place();
++        if (cardinal != null && !cardinalLanded) {
++            cardinalLanded = true;
++            place();
++        }
++    }
++
++    private void next() {
++        if (queue.isEmpty() || !started) {
++            for (String name : queue) settle(name);
++            queue.clear();
++            moment = null;
++            revealQuiet();
++            return;
++        }
++        String name = queue.remove(0);
++        if (!playOne(name)) next();
++    }
++
++    /** Ends whatever is playing (a key was pressed) and puts every piece where it ends up. */
++    void onUserKey() {
++        if (moment == null && queue.isEmpty()) return;
++        List<String> rest = queue;
++        queue = new ArrayList<>();
++        if (moment != null) moment.finishNow();
++        for (String name : rest) settle(name);
++        revealQuiet();
++    }
++
++    /** The end state of a moment that leaves something behind, without the moment. */
++    private void settle(String name) {
++        switch (name) {
++            case "ornament":
++                if (tree != null) tree.setState(ornaments(day), tree.hasStar(), tree.hasPresents());
++                break;
++            case "star":
++                if (tree != null) tree.setState(tree.ornaments(), true, tree.hasPresents());
++                break;
++            case "presents":
++                if (tree != null) tree.setState(tree.ornaments(), tree.hasStar(), true);
++                break;
++            case "tree_arrives":
++                if (treeBox != null) treeBox.setAlpha(dockAtRest ? 1f : 0f);
++                break;
++            case "lights_on":
++                if (lights != null) lights.setAlpha(1f);
++                break;
++            case "gnome_arrives":
++                gnomeShown = true;
++                place();
++                break;
++            case "cardinal":
++                cardinalLanded = true;
++                place();
++                break;
++            default:
++                break;
++        }
++    }
++
++    private void addMoment(HolidayMoments.Moment m) {
++        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                ViewGroup.LayoutParams.MATCH_PARENT);
++        if (m instanceof HolidayMoments.Aurora && sky != null) root.addView(m, root.indexOfChild(sky) + 1, lp);
++        else root.addView(m, lp);
++    }
++
++    private void playMoment(HolidayMoments.Moment m, long ms, Runnable after) {
++        moment = m;
++        addMoment(m);
++        m.play(ms, () -> {
++            root.removeView(m);
++            if (moment == m) moment = null;
++            if (after != null) after.run();
++            if (started) handler.postDelayed(this::next, 150);
++        });
++    }
++
++    private boolean playOne(String name) {
++        int w = root.getWidth(), h = root.getHeight();
++        switch (name) {
++            case "flurry":
++                playMoment(new HolidayMoments.Flurry(activity, 70, day.toEpochDay(), 0.4f), 3200, null);
++                return true;
++            case "shooting_star":
++                playMoment(new HolidayMoments.ShootingStar(activity, 2, day.toEpochDay()), 2200, null);
++                return true;
++            case "sleigh": {
++                PointF moonAt = sky != null ? sky.moonCentre() : null;
++                playMoment(new HolidayMoments.Sleigh(activity, moonAt != null, moonAt), 4200, null);
++                return true;
++            }
++            case "chase":
++                if (lights == null) return false;
++                playMoment(new HolidayMoments.Chase(activity, lights), 2600, null);
++                return true;
++            case "snowflake":
++                playMoment(new HolidayMoments.GiantFlake(activity, w * 0.6f, h * 0.36f), 3600, null);
++                return true;
++            case "aurora":
++                playMoment(new HolidayMoments.Aurora(activity), 5000, null);
++                return true;
++            case "ornament": {
++                if (tree == null) return false;
++                int index = ornaments(day) - 1;
++                if (index < 0) return false;
++                float[] s = tree.ornamentSpot(index);
++                playMoment(new HolidayMoments.OrnamentDrop(activity, treeBox.getX() + s[0], treeBox.getY() + s[1], s[2],
++                        index), 1500, () -> settle("ornament"));
++                return true;
++            }
++            case "star": {
++                if (tree == null) return false;
++                PointF c = tree.starCentre();
++                playMoment(new HolidayMoments.StarFlare(activity, treeBox.getX() + c.x, treeBox.getY() + c.y), 2200,
++                        () -> settle("star"));
++                return true;
++            }
++            case "presents":
++                if (tree == null) return false;
++                playMoment(new HolidayMoments.PresentsDrop(activity, treeBox.getX() + treeBox.getWidth() / 2f,
++                        treeBox.getY() + treeBox.getHeight()), 1600, () -> settle("presents"));
++                return true;
++            case "fireworks": {
++                DiwaliDecor.FireworksView show = new DiwaliDecor.FireworksView(activity);
++                HolidayArt.quiet(show);
++                root.addView(show, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                        ViewGroup.LayoutParams.MATCH_PARENT));
++                show.play(6000, () -> {
++                    root.removeView(show);
++                    if (started) handler.postDelayed(this::next, 150);
++                });
++                return true;
++            }
++            case "tree_arrives":
++                if (treeBox == null) return false;
++                treeBox.setTranslationY(dpi(22));
++                treeBox.animate().alpha(1f).translationY(0f).setDuration(1400).withEndAction(() -> {
++                    if (started) handler.postDelayed(this::next, 150);
++                }).start();
++                return true;
++            case "lights_on":
++                if (lights == null) return false;
++                lights.animate().alpha(1f).setDuration(1600).start();
++                playMoment(new HolidayMoments.Chase(activity, lights), 1800, null);
++                return true;
++            case "gnome_arrives": {
++                if (gnome == null) return false;
++                gnomeShown = true;
++                place();
++                gnome.setAlpha(1f);
++                gnome.setPivotY(gnome.getHeight());
++                gnome.setScaleX(0f);
++                gnome.setScaleY(0f);
++                gnome.animate().scaleX(1f).scaleY(1f).setDuration(650).setInterpolator(new OvershootInterpolator(2.2f))
++                        .withEndAction(() -> {
++                            if (started) handler.postDelayed(this::next, 150);
++                        }).start();
++                return true;
++            }
++            case "cardinal": {
++                PointF perch = perch();
++                if (cardinal == null || perch == null || cardinal.getWidth() == 0) return false;
++                float y = perch.y - cardinal.getHeight() * (HolidayArt.CardinalView.FOOT_Y / HolidayArt.CardinalView.BOX_H);
++                HolidayMoments.flyIn(cardinal, perch.x - cardinal.getWidth() / 2f, y, reduced, () -> {
++                    cardinalLanded = true;
++                    if (started) handler.postDelayed(this::next, 150);
++                });
++                return true;
++            }
++            default:
++                return false;
++        }
++    }
++
++    /** festival_preview_moment ("sleigh@0.5"): that moment held still, for screenshots. */
++    private void preview() {
++        String spec = festival.previewMoment;
++        int at = spec.indexOf('@');
++        String name = at < 0 ? spec : spec.substring(0, at);
++        float f = 0.5f;
++        try {
++            if (at >= 0) f = Float.parseFloat(spec.substring(at + 1));
++        } catch (NumberFormatException ignored) {
++            // keep the middle
++        }
++        place();
++        revealQuiet();
++        int w = root.getWidth(), h = root.getHeight();
++        HolidayMoments.Moment m = null;
++        switch (name) {
++            case "flurry":
++                m = new HolidayMoments.Flurry(activity, 70, 1, 0.4f);
++                break;
++            case "shooting_star":
++            case "meteors":
++                m = new HolidayMoments.ShootingStar(activity, 2, 3);
++                break;
++            case "sleigh": {
++                PointF moonAt = sky != null ? sky.moonCentre() : null;
++                m = new HolidayMoments.Sleigh(activity, moonAt != null, moonAt);
++                break;
++            }
++            case "chase":
++                if (lights != null) m = new HolidayMoments.Chase(activity, lights);
++                break;
++            case "snowflake":
++                m = new HolidayMoments.GiantFlake(activity, w * 0.6f, h * 0.36f);
++                break;
++            case "aurora":
++                m = new HolidayMoments.Aurora(activity);
++                break;
++            case "star":
++                if (tree != null) {
++                    PointF c = tree.starCentre();
++                    m = new HolidayMoments.StarFlare(activity, treeBox.getX() + c.x, treeBox.getY() + c.y);
++                }
++                break;
++            default:
++                break;
++        }
++        if (m == null) return;
++        addMoment(m);
++        m.hold(f);
++    }
++
++    /** Geminids nights: a shooting star every 15 to 40 seconds while Home is showing, from five in the evening. */
++    private void meteor() {
++        if (!started) return;
++        boolean dark = LocalTime.now().isAfter(LocalTime.of(17, 0)) || festival.previewDate != null;
++        if (dark && moment == null) {
++            HolidayMoments.ShootingStar s = new HolidayMoments.ShootingStar(activity, 1, SystemClock.elapsedRealtime());
++            addMoment(s);
++            s.play(1500, () -> root.removeView(s));
++        }
++        handler.postDelayed(meteor, 15_000 + new Random().nextInt(25_000));
++    }
++
++    /** Back on Home: shake the snow globe. Returns whether it did anything. */
++    boolean shake() {
++        if (reduced || !started) return false;
++        long now = SystemClock.elapsedRealtime();
++        if (now - lastShake < SHAKE_GAP_MS || moment != null) return true;
++        lastShake = now;
++        HolidayMoments.Flurry f = new HolidayMoments.Flurry(activity, 110, now, (now / 1000) % 2 == 0 ? 0.6f : -0.6f);
++        addMoment(f);
++        f.play(3000, () -> root.removeView(f));
++        if (gnome != null && gnomeShown && !gnomeHopping) {
++            gnome.setPivotY(gnome.getHeight());
++            gnome.animate().rotation(10f).setDuration(120).withEndAction(() ->
++                    gnome.animate().rotation(-8f).setDuration(160).withEndAction(() ->
++                            gnome.animate().rotation(0f).setDuration(200).start()).start()).start();
++        }
++        return true;
++    }
++
++    // ---- greeting and weather -----------------------------------------------------------------------
++
++    /** The greeting for now: the Santa tracker on Christmas Eve, a note when it's really snowing, else base. */
++    String greeting(String base) {
++        if (hasWord(plan.style, "santa")) return santa(Instant.now());
++        if (snowing) return base.isEmpty() ? "It's snowing!" : "It's snowing · " + base;
++        return base;
++    }
++
++    /** bravia_weather's text ("2° SNOW"): heavier snow while it snows outside, frost in the corners below zero. */
++    void onWeather(String text) {
++        String t = text == null ? "" : text.toLowerCase(Locale.ROOT);
++        boolean s = t.contains("snow");
++        boolean c = false;
++        int deg = t.indexOf('°');
++        if (deg > 0) {
++            try {
++                c = Integer.parseInt(t.substring(0, deg).trim()) <= 0;
++            } catch (NumberFormatException ignored) {
++                // no temperature: no frost
++            }
++        }
++        if (s != snowing) {
++            snowing = s;
++            if (snow != null) snow.setHeavy(s);
++        }
++        if (c != cold) {
++            cold = c;
++            if (frost != null) frost.setVisibility(c ? View.VISIBLE : View.GONE);
++        }
++    }
++
++    /**
++     * Christmas Eve: where Santa is, worked out on the TV. He sets off when it's midnight on the 25th somewhere
++     * (Kiribati, 10:00 UTC on the 24th) and is wherever midnight has most recently arrived (December offsets).
++     * He's "here" once midnight reaches the TV's own time zone, and nearly here in the hour before.
++     */
++    static String santa(Instant now) {
++        return santa(now, ZoneId.systemDefault().getRules().getOffset(now).getTotalSeconds() / 60);
++    }
++
++    /** As above, for a TV whose clock is {@code here} minutes east of UTC. */
++    static String santa(Instant now, int here) {
++        ZonedDateTime utc = now.atZone(ZoneOffset.UTC);
++        int year = utc.getMonthValue() == 1 ? utc.getYear() - 1 : utc.getYear();
++        long minutes = Duration.between(ZonedDateTime.of(year, 12, 25, 0, 0, 0, 0, ZoneOffset.UTC), utc).toMinutes();
++        // Midnight has passed everywhere east of (offset >= -minutes).
++        int threshold = (int) -minutes;
++        Object[][] places = {
++                {840, "Kiribati"}, {780, "New Zealand"}, {720, "Fiji"}, {660, "Sydney"}, {600, "Brisbane"},
++                {540, "Tokyo"}, {480, "Singapore"}, {420, "Bangkok"}, {360, "Dhaka"}, {345, "Nepal"},
++                {330, "India"}, {300, "Pakistan"}, {240, "Dubai"}, {180, "Nairobi"}, {120, "Cairo"}, {60, "Paris"},
++                {0, "London"}, {-60, "Cape Verde"}, {-180, "Rio"}, {-210, "Newfoundland"}, {-240, "Halifax"},
++                {-300, "New York"}, {-360, "Chicago"}, {-420, "Denver"}, {-480, "Los Angeles"},
++                {-540, "Alaska"}, {-600, "Hawaii"}, {-660, "Samoa"},
++        };
++        if (threshold > 840) return "Santa's packing the sleigh";
++        if (here >= threshold) return "Santa's here. Off to bed!";
++        if (here >= threshold - 60) return "Santa's nearly here. Bedtime!";
++        String where = "Kiribati";
++        for (Object[] p : places) {
++            if ((int) p[0] >= threshold) where = (String) p[1];
++        }
++        return "Santa's over " + where;
++    }
++
++    // ---- snowfall ---------------------------------------------------------------------------------
++
++    /**
++     * Snow in two depths, small far flakes and larger near ones, all behind Home's text and tiles. Each flake is a
++     * view with a glow bitmap; one TimeAnimator moves them all as view properties (no redraws). Extra flakes wait
++     * hidden for real snow.
++     */
++    private final class Snow {
++        private final List<View> flakes = new ArrayList<>();
++        private float[] x0 = new float[0], y0 = new float[0], v = new float[0], amp = new float[0],
++                per = new float[0], ph = new float[0], size = new float[0];
++        private boolean[] heavyOnly = new boolean[0];
++        private final TimeAnimator clock = new TimeAnimator();
++        private final int insertAt;
++        final int behindCount;
++        private boolean heavy;
++        private final Random rnd = new Random(0x5110L);
++
++        Snow(int insertAt) {
++            this.insertAt = insertAt;
++            int at = insertAt;
++            at = add(at, 26, 2.2f, 4.2f, 22, 34, 0.5f, 0.8f, false);
++            at = add(at, 12, 4.8f, 8f, 38, 58, 0.72f, 0.92f, false);
++            at = add(at, 22, 2.4f, 6f, 40, 70, 0.6f, 0.9f, true);
++            behindCount = at - insertAt;
++            clock.setTimeListener((animation, total, delta) -> frame(total / 1000f));
++        }
++
++        /** Adds n flakes of a size range (dp) and speed range (dp/s); returns the next insert index. */
++        private int add(int at, int n, float s0, float s1, float v0, float v1, float a0, float a1, boolean extra) {
++            int base = flakes.size();
++            x0 = Arrays.copyOf(x0, base + n);
++            y0 = Arrays.copyOf(y0, base + n);
++            v = Arrays.copyOf(v, base + n);
++            amp = Arrays.copyOf(amp, base + n);
++            per = Arrays.copyOf(per, base + n);
++            ph = Arrays.copyOf(ph, base + n);
++            size = Arrays.copyOf(size, base + n);
++            heavyOnly = Arrays.copyOf(heavyOnly, base + n);
++            for (int i = 0; i < n; i++) {
++                int k = base + i;
++                float s = (s0 + rnd.nextFloat() * (s1 - s0)) * d;
++                int px = Math.max(2, Math.round(s * (s1 > 20 ? 1f : 2.6f)));
++                View f = new View(activity);
++                Bitmap g = HolidayArt.glow(px, 0xFFEAF4FF, s1 > 20 ? 0.55f : 0.32f);
++                f.setBackground(new BitmapDrawable(activity.getResources(), g));
++                HolidayArt.quiet(f);
++                f.setAlpha(a0 + rnd.nextFloat() * (a1 - a0));
++                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(px, px, Gravity.TOP | Gravity.LEFT);
++                if (at < 0) root.addView(f, lp);
++                else root.addView(f, at++, lp);
++                if (extra) f.setVisibility(View.GONE);
++                flakes.add(f);
++                x0[k] = rnd.nextFloat() * screenW;
++                y0[k] = rnd.nextFloat() * (screenH + px);
++                v[k] = (v0 + rnd.nextFloat() * (v1 - v0)) * d;
++                amp[k] = (6 + rnd.nextFloat() * 18) * d * (s1 > 20 ? 2f : 1f);
++                per[k] = 4f + rnd.nextFloat() * 4f;
++                ph[k] = rnd.nextFloat() * 6.283f;
++                size[k] = px;
++                heavyOnly[k] = extra;
++            }
++            return at;
++        }
++
++        void setHeavy(boolean on) {
++            heavy = on;
++            for (int i = 0; i < flakes.size(); i++) {
++                if (heavyOnly[i]) flakes.get(i).setVisibility(on ? View.VISIBLE : View.GONE);
++            }
++        }
++
++        void frame(float t) {
++            float speed = heavy ? 1.35f : 1f;
++            for (int i = 0; i < flakes.size(); i++) {
++                View f = flakes.get(i);
++                if (f.getVisibility() != View.VISIBLE) continue;
++                float range = screenH + 2 * size[i];
++                float y = (y0[i] + v[i] * speed * t) % range - size[i];
++                float x = x0[i] + amp[i] * (float) Math.sin(6.2832f * t / per[i] + ph[i]);
++                f.setTranslationX(x - size[i] / 2f);
++                f.setTranslationY(y);
++            }
++        }
++
++        void start() {
++            if (clock.isPaused()) clock.resume();
++            else if (!clock.isStarted()) clock.start();
++        }
++
++        void stop() {
++            if (clock.isStarted()) clock.pause();
++        }
++    }
++
++    // ---- snow on the dock's tiles -------------------------------------------------------------------
++
++    /**
++     * A cap of snow on each dock tile. Landing on a tile knocks its snow off (it slides away and breaks up); the
++     * snow builds back over a minute and a half once you've moved on.
++     */
++    private final class SnowCaps extends RecyclerView.ItemDecoration {
++        private static final long FALL_MS = 650, REGROW_DELAY_MS = 5000, REGROW_MS = 90_000;
++        private final float[] knockedAt = new float[32];
++        private final long[] fellAt = new long[32], leftAt = new long[32];
++        private final float[][] bumps = new float[32][];
++        private final Paint cap = new Paint(Paint.ANTI_ALIAS_FLAG), shadow = new Paint(Paint.ANTI_ALIAS_FLAG),
++                chunk = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Path path = new Path();
++        private final android.graphics.Matrix shift = new android.graphics.Matrix();
++        private LinearGradient snowShade;
++        private final float capH;
++        private int focused = -1;
++        private boolean running;
++        private final Runnable regrow = new Runnable() {
++            @Override
++            public void run() {
++                if (!running) return;
++                if (anyGrowing()) grid.invalidate();
++                handler.postDelayed(this, 3000);
++            }
++        };
++
++        SnowCaps() {
++            capH = 12 * d;
++            Random rnd = new Random(0xCA95L);
++            for (int i = 0; i < bumps.length; i++) {
++                int n = 7 + rnd.nextInt(3);
++                bumps[i] = new float[n];
++                for (int k = 0; k < n; k++) bumps[i][k] = 0.02f + rnd.nextFloat() * 0.62f;
++            }
++            Arrays.fill(knockedAt, 0f);
++            snowShade = new LinearGradient(0, 0, 0, capH * 1.5f, new int[]{0xFFFFFFFF, 0xFFF1F5FA, 0xFFCFDBE8},
++                    new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP);
++            cap.setShader(snowShade);
++            shadow.setColor(0x38000000);
++            chunk.setColor(0xFFF2F6FB);
++        }
++
++        void resume() {
++            running = true;
++            handler.removeCallbacks(regrow);
++            handler.postDelayed(regrow, 3000);
++        }
++
++        void pause() {
++            running = false;
++            handler.removeCallbacks(regrow);
++        }
++
++        void setFocused(int position) {
++            if (position == focused) return;
++            long now = SystemClock.uptimeMillis();
++            if (focused >= 0 && focused < leftAt.length) leftAt[focused] = now;
++            float had = position >= 0 && position < fellAt.length ? level(position, now) : 0f;
++            focused = position;
++            if (had > 0.05f && !reduced) {
++                fellAt[position] = now;
++                knockedAt[position] = had;
++                grid.postInvalidateOnAnimation();
++            }
++            grid.invalidate();
++        }
++
++        /** How much snow tile i carries now, 0 to 1. */
++        private float level(int i, long now) {
++            if (i == focused) return 0f;
++            if (leftAt[i] == 0) return 1f;
++            float t = (now - leftAt[i] - REGROW_DELAY_MS) / (float) REGROW_MS;
++            return Math.max(0f, Math.min(1f, t));
++        }
++
++        private boolean anyGrowing() {
++            long now = SystemClock.uptimeMillis();
++            for (int i = 0; i < columns && i < leftAt.length; i++) {
++                if (i != focused && leftAt[i] != 0 && level(i, now) < 1f) return true;
++            }
++            return false;
++        }
++
++        @Override
++        public void onDrawOver(@NonNull Canvas c, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
++            long now = SystemClock.uptimeMillis();
++            boolean animating = false;
++            for (int k = 0; k < parent.getChildCount(); k++) {
++                View child = parent.getChildAt(k);
++                int pos = parent.getChildAdapterPosition(child);
++                if (pos < 0 || pos >= columns || pos >= bumps.length) continue;
++                View card = child.findViewById(R.id.card);
++                if (card == null || card.getWidth() == 0) continue;
++                float w = card.getWidth() * card.getScaleX(), h = card.getHeight() * card.getScaleY();
++                float cx = child.getLeft() + child.getTranslationX() + card.getLeft() + card.getWidth() / 2f;
++                float cy = child.getTop() + child.getTranslationY() + card.getTop() + card.getHeight() / 2f;
++                float left = cx - w / 2f, top = cy - h / 2f;
++                float lv = level(pos, now);
++                if (lv > 0.02f) drawCap(c, left, top, w, lv, pos, 0f, 255);
++                long since = now - fellAt[pos];
++                if (fellAt[pos] != 0 && since < FALL_MS) {
++                    animating = true;
++                    float t = since / (float) FALL_MS;
++                    int save = c.save();
++                    c.rotate((pos % 2 == 0 ? 7f : -7f) * t, left + w / 2f, top);
++                    drawCap(c, left, top, w, knockedAt[pos], pos, d * 46f * t * t, Math.round(255 * (1f - t)));
++                    c.restoreToCount(save);
++                    for (int j = 0; j < 7; j++) {
++                        float jx = left + w * (0.12f + 0.12f * j), jy = top + d * (10 + 70 * t * t) + d * 4 * (j % 3);
++                        chunk.setAlpha(Math.round(230 * (1f - t)));
++                        c.drawCircle(jx + d * 6 * (j % 2 == 0 ? t : -t), jy, d * (1.6f + (j % 3)), chunk);
++                    }
++                }
++            }
++            if (animating) parent.postInvalidateOnAnimation();
++        }
++
++        private void drawCap(Canvas c, float left, float top, float w, float level, int pos, float drop, int alpha) {
++            float hgt = capH * (0.35f + 0.65f * level);
++            float[] b = bumps[pos];
++            float y0 = top + d * 2.5f + drop;
++            path.reset();
++            path.moveTo(left - d * 2.5f, y0);
++            int n = b.length;
++            float prevX = left - d * 2.5f, prevY = y0 - hgt * 0.3f;
++            path.lineTo(prevX, prevY);
++            for (int i = 0; i < n; i++) {
++                float x = left + w * (i + 0.5f) / n;
++                float y = y0 - hgt * (0.62f + b[i]);
++                float mx = (prevX + x) / 2f, my = (prevY + y) / 2f;
++                path.quadTo(prevX, prevY, mx, my);
++                prevX = x;
++                prevY = y;
++            }
++            float endX = left + w + d * 2.5f, endY = y0 - hgt * 0.3f;
++            path.quadTo(prevX, prevY, endX, endY);
++            path.lineTo(endX, y0);
++            // a soft lip with two small drips over the tile's face
++            path.quadTo(left + w * 0.86f, y0 + d * 1.5f, left + w * 0.8f, y0 + d * 1.2f);
++            path.quadTo(left + w * 0.78f, y0 + d * 5f * level, left + w * 0.76f, y0 + d * 1.2f);
++            path.lineTo(left + w * 0.3f, y0 + d * 1.6f);
++            path.quadTo(left + w * 0.28f, y0 + d * 4f * level, left + w * 0.26f, y0 + d * 1.6f);
++            path.quadTo(left + w * 0.1f, y0 + d * 1.8f, left - d * 2.5f, y0);
++            path.close();
++            shadow.setAlpha(Math.round(56 * alpha / 255f));
++            c.save();
++            c.translate(0, d * 1.6f);
++            c.drawPath(path, shadow);
++            c.restore();
++            cap.setAlpha(alpha);
++            shift.setTranslate(0, y0 - hgt * 1.05f);
++            snowShade.setLocalMatrix(shift);
++            c.drawPath(path, cap);
++        }
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/HolidayIcons.java b/launcher/app/src/main/java/com/gathin/tvhome/HolidayIcons.java
+new file mode 100644
+index 0000000..42d7b92
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/HolidayIcons.java
+@@ -0,0 +1,511 @@
++package com.gathin.tvhome;
++
++import android.animation.ValueAnimator;
++import android.graphics.Canvas;
++import android.graphics.ColorFilter;
++import android.graphics.ColorMatrix;
++import android.graphics.ColorMatrixColorFilter;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.graphics.PixelFormat;
++import android.graphics.RadialGradient;
++import android.graphics.Rect;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.graphics.drawable.Drawable;
++import android.view.animation.DecelerateInterpolator;
++import android.view.animation.LinearInterpolator;
++
++import androidx.annotation.NonNull;
++import androidx.annotation.Nullable;
++
++/**
++ * bravia: the top bar's Christmas icons, in place of the Diwali ones while a "christmas" festival is on: a gold
++ * bell with a red bow for Inputs (it rings when the pill takes focus), a glass bauble for the network (it swings,
++ * and greys out while offline) and a snowflake for Settings (it turns a sixth). Like the Diwali icons each is
++ * drawn in a 24 x 24 unit box scaled into its bounds, and keeps its own colours (the pills don't tint it).
++ * {@link KnitPill} is the pills' background on Ugly Sweater Day.
++ */
++final class HolidayIcons {
++    private HolidayIcons() {
++    }
++
++    /** An icon that hangs from a point near its top and swings there: a damped swing that dies within a second. */
++    abstract static class Swinging extends Drawable {
++        static final float BOX = 24f;
++        private final float density;
++        private final float amplitude;
++        private final ValueAnimator animator;
++        private float angle;
++        private int dir = 1;
++        private boolean reduced;
++        int alpha = 255;
++
++        Swinging(float density, float amplitude) {
++            this.density = density;
++            this.amplitude = amplitude;
++            animator = ValueAnimator.ofFloat(0f, 1f);
++            animator.setDuration(1100);
++            animator.setInterpolator(new LinearInterpolator());
++            animator.addUpdateListener(a -> {
++                float t = a.getAnimatedFraction() * 1.1f;
++                angle = dir * this.amplitude * (float) (Math.exp(-t / 0.32) * Math.sin(2 * Math.PI * 2.7 * t));
++                invalidateSelf();
++            });
++        }
++
++        void setReducedMotion(boolean reduced) {
++            this.reduced = reduced;
++        }
++
++        /** Swings it, the other way from last time. */
++        void swing() {
++            if (reduced) return;
++            dir = -dir;
++            animator.cancel();
++            animator.start();
++        }
++
++        abstract float pivotX();
++
++        abstract float pivotY();
++
++        /** Draws the icon in the 24 x 24 box. */
++        abstract void drawIcon(Canvas c);
++
++        @Override
++        public void draw(@NonNull Canvas c) {
++            Rect b = getBounds();
++            int save = c.save();
++            c.translate(b.left, b.top);
++            c.scale(b.width() / BOX, b.height() / BOX);
++            if (alpha < 255) c.saveLayerAlpha(0, 0, BOX, BOX, alpha);
++            c.rotate(angle, pivotX(), pivotY());
++            drawIcon(c);
++            c.restoreToCount(save);
++        }
++
++        @Override
++        public int getIntrinsicWidth() {
++            return Math.round(BOX * density);
++        }
++
++        @Override
++        public int getIntrinsicHeight() {
++            return Math.round(BOX * density);
++        }
++
++        @Override
++        public void setAlpha(int alpha) {
++            if (this.alpha == alpha) return;
++            this.alpha = alpha;
++            invalidateSelf();
++        }
++
++        @Override
++        public int getAlpha() {
++            return alpha;
++        }
++
++        @Override
++        public void setColorFilter(@Nullable ColorFilter filter) {
++            // the icons keep their own colours
++        }
++
++        @Override
++        public int getOpacity() {
++            return PixelFormat.TRANSLUCENT;
++        }
++    }
++
++    static Paint fill(int color) {
++        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++        p.setColor(color);
++        return p;
++    }
++
++    static Paint stroke(int color, float width) {
++        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
++        p.setStyle(Paint.Style.STROKE);
++        p.setStrokeWidth(width);
++        p.setStrokeCap(Paint.Cap.ROUND);
++        p.setStrokeJoin(Paint.Join.ROUND);
++        p.setColor(color);
++        return p;
++    }
++
++    // ---- bell -------------------------------------------------------------------------------------
++
++    /** A gold bell under a red bow, lit from the top left. */
++    static final class Bell extends Swinging {
++        private final Path body = new Path(), loopL = new Path(), loopR = new Path(), tails = new Path();
++        private final Paint gold, goldEdge, lip, bow, bowEdge, clapper, shine;
++
++        Bell(float density) {
++            super(density, 15f);
++            body.moveTo(12f, 6.2f);
++            body.cubicTo(7.7f, 6.2f, 6.8f, 9.8f, 6.6f, 13f);
++            body.cubicTo(6.4f, 15.9f, 5.4f, 17.3f, 4.1f, 18.5f);
++            body.lineTo(19.9f, 18.5f);
++            body.cubicTo(18.6f, 17.3f, 17.6f, 15.9f, 17.4f, 13f);
++            body.cubicTo(17.2f, 9.8f, 16.3f, 6.2f, 12f, 6.2f);
++            body.close();
++            loopL.moveTo(12f, 4.6f);
++            loopL.cubicTo(10.4f, 2.0f, 6.6f, 1.6f, 6.6f, 3.9f);
++            loopL.cubicTo(6.6f, 5.9f, 10.0f, 5.6f, 12f, 4.6f);
++            loopL.close();
++            loopR.moveTo(12f, 4.6f);
++            loopR.cubicTo(13.6f, 2.0f, 17.4f, 1.6f, 17.4f, 3.9f);
++            loopR.cubicTo(17.4f, 5.9f, 14.0f, 5.6f, 12f, 4.6f);
++            loopR.close();
++            tails.moveTo(11.4f, 5f);
++            tails.lineTo(9.2f, 8.6f);
++            tails.lineTo(10.4f, 8.3f);
++            tails.lineTo(11.2f, 9.4f);
++            tails.lineTo(12f, 5.4f);
++            tails.lineTo(12.8f, 9.4f);
++            tails.lineTo(13.6f, 8.3f);
++            tails.lineTo(14.8f, 8.6f);
++            tails.lineTo(12.6f, 5f);
++            tails.close();
++
++            gold = new Paint(Paint.ANTI_ALIAS_FLAG);
++            gold.setShader(new LinearGradient(4f, 0f, 20f, 0f,
++                    new int[]{0xFF7A4E10, 0xFFD9A93E, 0xFFFFF2BE, 0xFFF0C252, 0xFFB07A1E, 0xFF6A440C},
++                    new float[]{0f, 0.2f, 0.36f, 0.55f, 0.82f, 1f}, Shader.TileMode.CLAMP));
++            goldEdge = stroke(0xFF5A3A08, 0.45f);
++            lip = new Paint(Paint.ANTI_ALIAS_FLAG);
++            lip.setShader(new LinearGradient(3.6f, 0f, 20.4f, 0f,
++                    new int[]{0xFF8A5A12, 0xFFF6D57A, 0xFFE2B044, 0xFF8A5A12}, null, Shader.TileMode.CLAMP));
++            bow = new Paint(Paint.ANTI_ALIAS_FLAG);
++            bow.setShader(new LinearGradient(0f, 1.5f, 0f, 9.5f, new int[]{0xFFF04050, 0xFFC8102E, 0xFF7E0A1C},
++                    null, Shader.TileMode.CLAMP));
++            bowEdge = stroke(0xFF5C0712, 0.35f);
++            clapper = new Paint(Paint.ANTI_ALIAS_FLAG);
++            clapper.setShader(new RadialGradient(11.4f, 20.6f, 2.2f, new int[]{0xFFFFF0B0, 0xFFC08A26, 0xFF6A440C},
++                    null, Shader.TileMode.CLAMP));
++            shine = fill(0x99FFFFFF);
++        }
++
++        @Override
++        float pivotX() {
++            return 12f;
++        }
++
++        @Override
++        float pivotY() {
++            return 4.4f;
++        }
++
++        @Override
++        void drawIcon(Canvas c) {
++            c.drawCircle(12f, 20.8f, 1.6f, clapper);
++            c.drawPath(body, gold);
++            c.drawPath(body, goldEdge);
++            c.drawRoundRect(3.7f, 18.1f, 20.3f, 20.0f, 0.9f, 0.9f, lip);
++            c.drawRoundRect(3.7f, 18.1f, 20.3f, 20.0f, 0.9f, 0.9f, goldEdge);
++            c.drawOval(8.2f, 8.4f, 9.6f, 13.4f, shine);
++            c.drawPath(tails, bow);
++            c.drawPath(tails, bowEdge);
++            c.drawPath(loopL, bow);
++            c.drawPath(loopL, bowEdge);
++            c.drawPath(loopR, bow);
++            c.drawPath(loopR, bowEdge);
++            c.drawCircle(12f, 4.6f, 1.25f, bow);
++            c.drawCircle(12f, 4.6f, 1.25f, bowEdge);
++        }
++    }
++
++    // ---- bauble -----------------------------------------------------------------------------------
++
++    /** A red glass bauble with a gold cap and a band of gold; grey while the TV is offline. */
++    static final class Bauble extends Swinging {
++        private final Paint ball, cap, capEdge, loop, band, shine, shine2, edge;
++        private final Path bandPath = new Path();
++        private final ColorMatrixColorFilter grey;
++        private boolean online = true;
++
++        Bauble(float density) {
++            super(density, 12f);
++            ball = new Paint(Paint.ANTI_ALIAS_FLAG);
++            ball.setShader(new RadialGradient(9.2f, 10.4f, 11.5f,
++                    new int[]{0xFFFF8A98, 0xFFE3233F, 0xFF9C0B26, 0xFF4A0611},
++                    new float[]{0f, 0.32f, 0.72f, 1f}, Shader.TileMode.CLAMP));
++            edge = stroke(0x66330408, 0.4f);
++            cap = new Paint(Paint.ANTI_ALIAS_FLAG);
++            cap.setShader(new LinearGradient(9.8f, 0f, 14.2f, 0f,
++                    new int[]{0xFF8A5A12, 0xFFFFE9A6, 0xFFD9A43A, 0xFF7A4E10}, null, Shader.TileMode.CLAMP));
++            capEdge = stroke(0xFF5A3A08, 0.35f);
++            loop = stroke(0xFFD9A43A, 0.75f);
++            band = stroke(0xDDF2C75C, 0.9f);
++            bandPath.moveTo(3.6f, 13.4f);
++            bandPath.quadTo(12f, 17.2f, 20.4f, 13.4f);
++            shine = fill(0xC8FFFFFF);
++            shine2 = fill(0x80FFFFFF);
++            ColorMatrix m = new ColorMatrix();
++            m.setSaturation(0f);
++            grey = new ColorMatrixColorFilter(m);
++        }
++
++        /** Grey and dimmer while offline. */
++        void setOnline(boolean online) {
++            if (this.online == online) return;
++            this.online = online;
++            ColorFilter f = online ? null : grey;
++            for (Paint p : new Paint[]{ball, cap, loop, band}) p.setColorFilter(f);
++            invalidateSelf();
++        }
++
++        @Override
++        float pivotX() {
++            return 12f;
++        }
++
++        @Override
++        float pivotY() {
++            return 1.2f;
++        }
++
++        @Override
++        void drawIcon(Canvas c) {
++            c.drawCircle(12f, 2.4f, 1.15f, loop);
++            c.drawCircle(12f, 14.2f, 8.6f, ball);
++            c.drawCircle(12f, 14.2f, 8.6f, edge);
++            c.save();
++            c.clipRect(3f, 5f, 21f, 23f);
++            c.drawPath(bandPath, band);
++            c.restore();
++            c.save();
++            c.rotate(-35f, 8.8f, 10.4f);
++            c.drawOval(6.2f, 9.3f, 11.4f, 11.6f, shine);
++            c.restore();
++            c.drawCircle(15.6f, 18.4f, 0.7f, shine2);
++            c.drawRoundRect(9.9f, 3.3f, 14.1f, 6.0f, 0.6f, 0.6f, cap);
++            c.drawRoundRect(9.9f, 3.3f, 14.1f, 6.0f, 0.6f, 0.6f, capEdge);
++        }
++    }
++
++    // ---- snowflake --------------------------------------------------------------------------------
++
++    /** Draws a six-armed snowflake with side branches at (cx, cy), arms r long, in the current paint. */
++    static void snowflake(Canvas c, float cx, float cy, float r, Paint line) {
++        for (int k = 0; k < 6; k++) {
++            double a = Math.PI / 3 * k - Math.PI / 2;
++            float ux = (float) Math.cos(a), uy = (float) Math.sin(a);
++            c.drawLine(cx, cy, cx + ux * r, cy + uy * r, line);
++            float[][] branches = {{0.42f, 0.30f}, {0.68f, 0.22f}};
++            for (float[] br : branches) {
++                float bx = cx + ux * r * br[0], by = cy + uy * r * br[0];
++                for (int s = -1; s <= 1; s += 2) {
++                    double b = a + s * Math.toRadians(58);
++                    c.drawLine(bx, by, bx + (float) Math.cos(b) * r * br[1], by + (float) Math.sin(b) * r * br[1], line);
++                }
++            }
++        }
++    }
++
++    /** An icy snowflake; {@link #turn()} turns it a sixth of a circle. */
++    static final class Snowflake extends Drawable {
++        private static final float BOX = 24f;
++        private final float density;
++        private final Paint halo, line, glint;
++        private final ValueAnimator animator;
++        private float rotation, from, target;
++        private boolean reduced;
++        private int alpha = 255;
++
++        Snowflake(float density) {
++            this.density = density;
++            halo = stroke(0x995FA8E8, 2.3f);
++            line = stroke(0xFFF2FAFF, 1.15f);
++            glint = new Paint(Paint.ANTI_ALIAS_FLAG);
++            glint.setShader(new RadialGradient(12f, 12f, 4.2f, new int[]{0xCCFFFFFF, 0x55CFE8FF, 0x00CFE8FF}, null,
++                    Shader.TileMode.CLAMP));
++            animator = ValueAnimator.ofFloat(0f, 1f);
++            animator.setDuration(900);
++            animator.setInterpolator(new DecelerateInterpolator(1.6f));
++            animator.addUpdateListener(a -> {
++                rotation = from + (target - from) * (float) a.getAnimatedValue();
++                invalidateSelf();
++            });
++        }
++
++        void setReducedMotion(boolean reduced) {
++            this.reduced = reduced;
++        }
++
++        void turn() {
++            if (reduced) return;
++            from = rotation;
++            target = target + 60f;
++            animator.cancel();
++            animator.start();
++        }
++
++        @Override
++        public void draw(@NonNull Canvas c) {
++            Rect b = getBounds();
++            int save = c.save();
++            c.translate(b.left, b.top);
++            c.scale(b.width() / BOX, b.height() / BOX);
++            if (alpha < 255) c.saveLayerAlpha(0, 0, BOX, BOX, alpha);
++            c.rotate(rotation, 12f, 12f);
++            snowflake(c, 12f, 12f, 10.2f, halo);
++            snowflake(c, 12f, 12f, 10.2f, line);
++            c.drawCircle(12f, 12f, 4.2f, glint);
++            c.restoreToCount(save);
++        }
++
++        @Override
++        public int getIntrinsicWidth() {
++            return Math.round(BOX * density);
++        }
++
++        @Override
++        public int getIntrinsicHeight() {
++            return Math.round(BOX * density);
++        }
++
++        @Override
++        public void setAlpha(int alpha) {
++            if (this.alpha == alpha) return;
++            this.alpha = alpha;
++            invalidateSelf();
++        }
++
++        @Override
++        public int getAlpha() {
++            return alpha;
++        }
++
++        @Override
++        public void setColorFilter(@Nullable ColorFilter filter) {
++            // keeps its own colours
++        }
++
++        @Override
++        public int getOpacity() {
++            return PixelFormat.TRANSLUCENT;
++        }
++    }
++
++    // ---- knitted pill (Ugly Sweater Day) -----------------------------------------------------------
++
++    /**
++     * A pill knitted in red wool: rows of little V stitches, a white sawtooth border top and bottom and a row of
++     * white diamonds between them. Focused, the colours swap (cream wool, red pattern) so dark focus text reads.
++     */
++    static final class KnitPill extends Drawable {
++        private final float d;
++        private final Paint wool = new Paint(Paint.ANTI_ALIAS_FLAG), stitch, motif = new Paint(Paint.ANTI_ALIAS_FLAG),
++                rim;
++        private final Path clip = new Path(), saw = new Path(), diamonds = new Path(), stitches = new Path();
++        private final RectF r = new RectF();
++        private boolean focused;
++        private int alpha = 255;
++
++        KnitPill(float density) {
++            d = density;
++            stitch = stroke(0, 0.7f * density);
++            rim = stroke(0, 1.5f * density);
++            rim.setStrokeCap(Paint.Cap.BUTT);
++        }
++
++        @Override
++        protected void onBoundsChange(@NonNull Rect b) {
++            super.onBoundsChange(b);
++            r.set(b);
++            float h = r.height(), rad = h / 2f;
++            clip.reset();
++            clip.addRoundRect(r, rad, rad, Path.Direction.CW);
++            float step = 5f * d, row = 5f * d;
++            stitches.reset();
++            for (float y = r.top + row * 0.6f; y < r.bottom; y += row) {
++                for (float x = r.left + step * 0.5f; x < r.right; x += step) {
++                    stitches.moveTo(x - step * 0.32f, y - row * 0.3f);
++                    stitches.lineTo(x, y + row * 0.18f);
++                    stitches.lineTo(x + step * 0.32f, y - row * 0.3f);
++                }
++            }
++            saw.reset();
++            float tooth = 6f * d;
++            for (int edge = 0; edge < 2; edge++) {
++                float base = edge == 0 ? r.top + h * 0.2f : r.bottom - h * 0.2f;
++                float tip = edge == 0 ? base - h * 0.1f : base + h * 0.1f;
++                saw.moveTo(r.left, base);
++                for (float x = r.left; x < r.right; x += tooth) {
++                    saw.lineTo(x + tooth / 2f, tip);
++                    saw.lineTo(x + tooth, base);
++                }
++                saw.lineTo(r.right, edge == 0 ? r.top : r.bottom);
++                saw.lineTo(r.left, edge == 0 ? r.top : r.bottom);
++                saw.close();
++            }
++            diamonds.reset();   // a row of dots in each border band, clear of the text
++            float gap = 9f * d, dot = 0.9f * d;
++            for (int edge = 0; edge < 2; edge++) {
++                float y = edge == 0 ? r.top + h * 0.075f : r.bottom - h * 0.075f;
++                for (float x = r.left + rad * 0.7f; x < r.right - rad * 0.7f; x += gap) {
++                    diamonds.addCircle(x, y, dot, Path.Direction.CW);
++                }
++            }
++        }
++
++        @Override
++        public boolean isStateful() {
++            return true;
++        }
++
++        @Override
++        protected boolean onStateChange(@NonNull int[] state) {
++            boolean f = false;
++            for (int s : state) if (s == android.R.attr.state_focused) f = true;
++            if (f == focused) return false;
++            focused = f;
++            invalidateSelf();
++            return true;
++        }
++
++        @Override
++        public void draw(@NonNull Canvas c) {
++            if (r.isEmpty()) return;
++            int save = c.save();
++            if (alpha < 255) c.saveLayerAlpha(r, alpha);
++            c.clipPath(clip);
++            wool.setColor(focused ? 0xFFF7ECDA : 0xFFAE1530);
++            c.drawRect(r, wool);
++            stitch.setColor(focused ? 0xFFEDE0CB : 0xFF9C1128);
++            c.drawPath(stitches, stitch);
++            motif.setColor(focused ? 0xFFAE1530 : 0xFFF7F2EA);
++            c.drawPath(saw, motif);
++            c.drawPath(diamonds, motif);
++            c.restoreToCount(save);
++            rim.setColor(focused ? 0xFFFFFFFF : 0x80FFFFFF);
++            rim.setStrokeWidth((focused ? 2.5f : 1.5f) * d);
++            float inset = rim.getStrokeWidth() / 2f;
++            c.drawRoundRect(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset,
++                    r.height() / 2f - inset, r.height() / 2f - inset, rim);
++        }
++
++        @Override
++        public void setAlpha(int alpha) {
++            this.alpha = alpha;
++            invalidateSelf();
++        }
++
++        @Override
++        public int getAlpha() {
++            return alpha;
++        }
++
++        @Override
++        public void setColorFilter(@Nullable ColorFilter filter) {
++        }
++
++        @Override
++        public int getOpacity() {
++            return PixelFormat.TRANSLUCENT;
++        }
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/HolidayMoments.java b/launcher/app/src/main/java/com/gathin/tvhome/HolidayMoments.java
+new file mode 100644
+index 0000000..d22594f
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/HolidayMoments.java
+@@ -0,0 +1,618 @@
++package com.gathin.tvhome;
++
++import android.animation.Animator;
++import android.animation.AnimatorListenerAdapter;
++import android.animation.ValueAnimator;
++import android.content.Context;
++import android.graphics.Bitmap;
++import android.graphics.Canvas;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.graphics.PointF;
++import android.graphics.RadialGradient;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.view.View;
++import android.view.animation.LinearInterpolator;
++
++import java.util.List;
++import java.util.Random;
++
++/**
++ * bravia: the Christmas season's moments, each a few seconds long, played over Home the first time it opens on a
++ * day (HolidayDecor picks which from festival_calendar). A moment is a full-screen overlay redrawn every frame
++ * while it plays and removed when it ends, so it costs nothing afterwards. hold(f) draws one frame and keeps it,
++ * for screenshots (festival_preview_moment).
++ */
++final class HolidayMoments {
++    private HolidayMoments() {
++    }
++
++    abstract static class Moment extends View {
++        final float d;
++        float f;
++        private ValueAnimator anim;
++        private Runnable done;
++        private boolean finished;
++
++        Moment(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            HolidayArt.quiet(this);
++            setWillNotDraw(false);
++        }
++
++        float dp(float v) {
++            return v * d;
++        }
++
++        /** Plays over ms, then runs onDone (once). */
++        void play(long ms, Runnable onDone) {
++            done = onDone;
++            anim = ValueAnimator.ofFloat(0f, 1f);
++            anim.setDuration(ms);
++            anim.setInterpolator(new LinearInterpolator());
++            anim.addUpdateListener(a -> {
++                f = (float) a.getAnimatedValue();
++                invalidate();
++            });
++            anim.addListener(new AnimatorListenerAdapter() {
++                @Override
++                public void onAnimationEnd(Animator a) {
++                    finish();
++                }
++            });
++            onStart();
++            anim.start();
++        }
++
++        /** Shows the frame at f and stays there. */
++        void hold(float at) {
++            f = Math.max(0f, Math.min(1f, at));
++            onStart();
++            invalidate();
++        }
++
++        /** Jumps to the end (a key was pressed): whatever the moment leaves behind is put in place at once. */
++        void finishNow() {
++            if (anim != null) anim.end();
++            else finish();
++        }
++
++        private void finish() {
++            if (finished) return;
++            finished = true;
++            Runnable r = done;
++            done = null;
++            if (r != null) r.run();
++        }
++
++        void onStart() {
++        }
++
++        /** 0 to 1 over [a, b] of the moment, eased in and out. */
++        static float span(float f, float a, float b) {
++            float t = Math.max(0f, Math.min(1f, (f - a) / (b - a)));
++            return t * t * (3 - 2 * t);
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            frame(c, f);
++        }
++
++        abstract void frame(Canvas c, float f);
++    }
++
++    // ---- flurry -----------------------------------------------------------------------------------
++
++    /** A burst of snow from the top: the day's first flurry, or the snow globe shaken with Back. */
++    static final class Flurry extends Moment {
++        private final int n;
++        private final float[] x0, y0, v, s, a, ph;
++        private final Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++        private final float wind;
++
++        Flurry(Context c, int count, long seed, float wind) {
++            super(c);
++            n = count;
++            this.wind = wind;
++            x0 = new float[n];
++            y0 = new float[n];
++            v = new float[n];
++            s = new float[n];
++            a = new float[n];
++            ph = new float[n];
++            Random rnd = new Random(seed);
++            for (int i = 0; i < n; i++) {
++                x0[i] = rnd.nextFloat() * 1.2f - 0.1f;
++                y0[i] = -rnd.nextFloat() * 0.45f;
++                v[i] = 0.9f + rnd.nextFloat() * 0.8f;
++                s[i] = 1.5f + rnd.nextFloat() * (rnd.nextInt(6) == 0 ? 5f : 2.6f);
++                a[i] = 0.55f + rnd.nextFloat() * 0.45f;
++                ph[i] = rnd.nextFloat() * 6.28f;
++            }
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            int w = getWidth(), h = getHeight();
++            float fade = Math.min(1f, f * 8f) * (1f - span(f, 0.78f, 1f));
++            for (int i = 0; i < n; i++) {
++                float y = (y0[i] + v[i] * f * 1.25f) * h;
++                if (y < -dp(10) || y > h + dp(10)) continue;
++                float x = x0[i] * w + wind * f * w * 0.25f + dp(14) * (float) Math.sin(ph[i] + f * 9f);
++                float size = dp(s[i]) * 2.4f;
++                p.setAlpha(Math.round(255 * a[i] * fade));
++                r.set(x - size / 2, y - size / 2, x + size / 2, y + size / 2);
++                c.drawBitmap(HolidayArt.glow(Math.round(dp(14)), 0xFFEAF4FF, 0.3f), null, r, p);
++            }
++        }
++    }
++
++    // ---- shooting star ----------------------------------------------------------------------------
++
++    /** One or two shooting stars across the upper sky. */
++    static final class ShootingStar extends Moment {
++        private final float[][] streaks;   // x0, y0 (fractions), angle, delay
++        private final Paint head = new Paint(Paint.FILTER_BITMAP_FLAG), tail = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final RectF r = new RectF();
++
++        ShootingStar(Context c, int count, long seed) {
++            super(c);
++            Random rnd = new Random(seed);
++            streaks = new float[count][4];
++            for (int i = 0; i < count; i++) {
++                streaks[i][0] = 0.35f + rnd.nextFloat() * 0.6f;
++                streaks[i][1] = 0.05f + rnd.nextFloat() * 0.22f;
++                streaks[i][2] = (float) Math.toRadians(150 + rnd.nextInt(22));
++                streaks[i][3] = i * 0.28f;
++            }
++            tail.setStrokeCap(Paint.Cap.ROUND);
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            int w = getWidth(), h = getHeight();
++            for (float[] s : streaks) {
++                float t = (f - s[3]) / (1f - s[3] * 0.9f);
++                if (t <= 0f || t >= 1f) continue;
++                float len = dp(300) * t, life = (float) Math.sin(Math.PI * t);
++                float ux = (float) Math.cos(s[2]), uy = (float) Math.sin(s[2]);
++                float hx = s[0] * w + ux * len, hy = s[1] * h + uy * len;
++                float tl = dp(130) * life;
++                for (int k = 0; k < 14; k++) {
++                    float q = k / 14f;
++                    tail.setColor(0xFFFFF4D8);
++                    tail.setAlpha(Math.round(200 * life * (1f - q)));
++                    tail.setStrokeWidth(dp(2.2f) * (1f - q));
++                    c.drawLine(hx - ux * tl * q, hy - uy * tl * q, hx - ux * tl * (q + 0.08f), hy - uy * tl * (q + 0.08f), tail);
++                }
++                int size = Math.round(dp(18));
++                head.setAlpha(Math.round(255 * life));
++                r.set(hx - size / 2f, hy - size / 2f, hx + size / 2f, hy + size / 2f);
++                c.drawBitmap(HolidayArt.glow(size, 0xFFFFF0C8, 0.15f), null, r, head);
++            }
++        }
++    }
++
++    // ---- sleigh -----------------------------------------------------------------------------------
++
++    /**
++     * A sleigh and four reindeer flying across the sky from right to left. Lit gold against the night with a trail
++     * of sparkles, or a dark silhouette when it crosses the moon.
++     */
++    static final class Sleigh extends Moment {
++        private final Path deer = new Path(), deerLines = new Path(), sleigh = new Path(), santa = new Path(),
++                reins = new Path();
++        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), line = new Paint(Paint.ANTI_ALIAS_FLAG),
++                spark = new Paint(Paint.FILTER_BITMAP_FLAG), glowPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++        private final boolean dark;
++        private final PointF across;   // a point the flight passes through (the moon), or null
++        private final float scale;
++
++        Sleigh(Context c, boolean dark, PointF across) {
++            super(c);
++            this.dark = dark;
++            this.across = across;
++            scale = c.getResources().getDisplayMetrics().density * 0.62f;
++            int col = dark ? 0xFF0A0E18 : 0xFFFFE7B3;
++            fill.setColor(col);
++            line.setColor(col);
++            line.setStyle(Paint.Style.STROKE);
++            line.setStrokeWidth(1.7f);
++            line.setStrokeCap(Paint.Cap.ROUND);
++            line.setStrokeJoin(Paint.Join.ROUND);
++            float[] xs = {0, 40, 80, 118};
++            float[] ys = {0, 3, -1, 2};
++            for (int i = 0; i < 4; i++) addDeer(xs[i], ys[i] + 8, i % 2 == 0);
++            // reins from the lead deer's chest back to the sleigh
++            reins.moveTo(10, 14);
++            reins.quadTo(90, 22, 168, 28);
++            // the sleigh: a curled runner and a body high at the back
++            sleigh.moveTo(160, 30);
++            sleigh.quadTo(156, 22, 166, 21);
++            sleigh.lineTo(172, 21);
++            sleigh.lineTo(176, 30);
++            sleigh.lineTo(210, 30);
++            sleigh.quadTo(214, 18, 212, 8);
++            sleigh.quadTo(206, 10, 204, 18);
++            sleigh.lineTo(180, 18);
++            sleigh.lineTo(176, 30);
++            sleigh.close();
++            santa.addCircle(190, 8, 4.4f, Path.Direction.CW);
++            santa.moveTo(186, 6);
++            santa.lineTo(194, 5);
++            santa.lineTo(198, -3);
++            santa.close();
++            santa.addOval(new RectF(181, 9, 200, 22), Path.Direction.CW);
++            santa.addOval(new RectF(197, 4, 211, 19), Path.Direction.CW);   // the sack
++            deerLines.moveTo(158, 34);
++            deerLines.quadTo(184, 37, 214, 33);   // the runner
++            deerLines.quadTo(220, 31, 218, 27);
++        }
++
++        private void addDeer(float x, float y, boolean stride) {
++            deer.addOval(new RectF(x + 7, y + 6, x + 29, y + 15), Path.Direction.CW);   // body
++            deer.addOval(new RectF(x - 1, y - 3, x + 7, y + 2), Path.Direction.CW);    // head
++            deerLines.moveTo(x + 9, y + 8);
++            deerLines.quadTo(x + 5, y + 4, x + 4, y);              // neck
++            deerLines.moveTo(x + 4, y - 2);
++            deerLines.lineTo(x + 7, y - 9);                          // antler
++            deerLines.moveTo(x + 6, y - 6);
++            deerLines.lineTo(x + 3, y - 9);
++            deerLines.moveTo(x + 7, y - 9);
++            deerLines.lineTo(x + 10, y - 11);
++            float s = stride ? 1f : -1f;
++            deerLines.moveTo(x + 10, y + 13);
++            deerLines.lineTo(x + 4 - s, y + 20);                     // front legs reaching forward
++            deerLines.moveTo(x + 13, y + 13);
++            deerLines.lineTo(x + 8 + s, y + 21);
++            deerLines.moveTo(x + 25, y + 13);
++            deerLines.lineTo(x + 32 + s, y + 18);                    // hind legs pushing back
++            deerLines.moveTo(x + 27, y + 12);
++            deerLines.lineTo(x + 35 - s, y + 15);
++            deerLines.moveTo(x + 29, y + 8);
++            deerLines.lineTo(x + 32, y + 6);                         // tail
++        }
++
++        private PointF at(float t, int w, int h) {
++            float x0 = w + dp(60), x2 = -dp(220);
++            float y0, y1, y2;
++            if (across != null) {
++                y0 = across.y + dp(40);
++                y2 = across.y - dp(30);
++                // the curve's middle passes through the moon at t = 0.5
++                y1 = 2 * across.y - (y0 + y2) / 2f;
++                float x1 = 2 * across.x - (x0 + x2) / 2f;
++                return quad(t, x0, x1, x2, y0, y1, y2);
++            }
++            // under the date line and the top bar, over the open sky
++            y0 = h * 0.33f;
++            y1 = h * 0.1f;
++            y2 = h * 0.28f;
++            return quad(t, x0, w * 0.5f, x2, y0, y1, y2);
++        }
++
++        private static PointF quad(float t, float x0, float x1, float x2, float y0, float y1, float y2) {
++            float u = 1 - t;
++            return new PointF(u * u * x0 + 2 * u * t * x1 + t * t * x2, u * u * y0 + 2 * u * t * y1 + t * t * y2);
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            int w = getWidth(), h = getHeight();
++            if (w == 0) return;
++            float alpha = Math.min(1f, f * 6f) * (1f - span(f, 0.9f, 1f));
++            if (!dark) {
++                // a trail of sparkles where the sleigh has been
++                int size = Math.round(dp(10));
++                for (int k = 1; k <= 18; k++) {
++                    float tt = f - k * 0.012f;
++                    if (tt < 0) break;
++                    PointF p = at(tt, w, h);
++                    float jitter = dp(4) * (float) Math.sin(k * 2.1f + f * 40f);
++                    spark.setAlpha(Math.round(200 * alpha * (1f - k / 19f)));
++                    float sx = p.x + dp(130) * 0.62f + k * dp(1.5f), sy = p.y + dp(16) + jitter;
++                    r.set(sx - size / 2f, sy - size / 2f, sx + size / 2f, sy + size / 2f);
++                    c.drawBitmap(HolidayArt.glow(size, 0xFFFFE2A0, 0.2f), null, r, spark);
++                }
++            }
++            PointF p = at(f, w, h);
++            PointF q = at(Math.min(1f, f + 0.01f), w, h);
++            float tilt = (float) Math.toDegrees(Math.atan2(q.y - p.y, p.x - q.x));
++            int save = c.save();
++            c.translate(p.x, p.y);
++            c.rotate(-tilt * 0.6f);
++            c.scale(scale, scale);
++            if (!dark) {
++                glowPaint.setAlpha(Math.round(70 * alpha));
++                r.set(-20, -60, 240, 90);
++                c.drawBitmap(HolidayArt.glow(Math.round(dp(40)), 0xFFFFD98A, 0.05f), null, r, glowPaint);
++            }
++            fill.setAlpha(Math.round(255 * alpha));
++            line.setAlpha(Math.round(255 * alpha));
++            c.drawPath(deer, fill);
++            c.drawPath(deerLines, line);
++            c.drawPath(reins, line);
++            c.drawPath(sleigh, fill);
++            c.drawPath(santa, fill);
++            c.restoreToCount(save);
++        }
++    }
++
++    // ---- lights chase -----------------------------------------------------------------------------
++
++    /** The fairy lights flare one after another, left to right and back. */
++    static final class Chase extends Moment {
++        private final List<PointF> bulbs;
++        private final HolidayArt.LightString lights;
++        private final Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++
++        Chase(Context c, HolidayArt.LightString lights) {
++            super(c);
++            this.lights = lights;
++            bulbs = lights.bulbs();
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            int n = bulbs.size();
++            if (n == 0) return;
++            float pos = f < 0.5f ? span(f, 0f, 0.5f) * (n + 6) - 3 : (1f - span(f, 0.5f, 1f)) * (n + 6) - 3;
++            int size = Math.round(dp(30));
++            for (int i = 0; i < n; i++) {
++                float k = (i - pos) / 2.4f;
++                float e = (float) Math.exp(-k * k);
++                if (e < 0.03f) continue;
++                PointF b = bulbs.get(i);
++                p.setAlpha(Math.round(255 * e));
++                r.set(b.x - size / 2f, b.y - size / 2f, b.x + size / 2f, b.y + size / 2f);
++                c.drawBitmap(HolidayArt.glow(size, lights.bulbColour(i), 0.16f), null, r, p);
++            }
++        }
++    }
++
++    // ---- snowflake --------------------------------------------------------------------------------
++
++    /** A large crystal snowflake turns in, glows, then breaks into flakes that drift down. */
++    static final class GiantFlake extends Moment {
++        private final float cx, cy, radius;
++        private final Paint halo = HolidayIcons.stroke(0x885FA8E8, 1f), line = HolidayIcons.stroke(0xFFF4FBFF, 1f),
++                bits = new Paint(Paint.FILTER_BITMAP_FLAG), core = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final float[][] shards = new float[36][4];
++        private final RectF r = new RectF();
++
++        GiantFlake(Context c, float cx, float cy) {
++            super(c);
++            this.cx = cx;
++            this.cy = cy;
++            radius = dp(62);
++            Random rnd = new Random(0xF1A4EL);
++            for (float[] s : shards) {
++                double a = rnd.nextFloat() * Math.PI * 2;
++                float rr = rnd.nextFloat() * radius;
++                s[0] = (float) Math.cos(a) * rr;
++                s[1] = (float) Math.sin(a) * rr;
++                s[2] = (float) Math.cos(a) * dp(40 + rnd.nextInt(60));
++                s[3] = 1.5f + rnd.nextFloat() * 2.5f;
++            }
++            core.setShader(new RadialGradient(cx, cy, radius * 0.9f, new int[]{0x66DDF0FF, 0x22BFE3FF, 0x00BFE3FF},
++                    null, Shader.TileMode.CLAMP));
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            float in = span(f, 0f, 0.32f), out = span(f, 0.6f, 0.85f);
++            float scale = 0.35f + 0.65f * in, alpha = in * (1f - out);
++            if (alpha > 0.01f) {
++                int save = c.save();
++                c.rotate(-70f * (1f - in) + 8f * span(f, 0.32f, 0.6f), cx, cy);
++                core.setAlpha(Math.round(255 * alpha));
++                c.drawCircle(cx, cy, radius * 0.9f * scale, core);
++                halo.setStrokeWidth(dp(5.5f) * scale);
++                halo.setAlpha(Math.round(130 * alpha));
++                line.setStrokeWidth(dp(2.4f) * scale);
++                line.setAlpha(Math.round(255 * alpha));
++                HolidayIcons.snowflake(c, cx, cy, radius * scale, halo);
++                HolidayIcons.snowflake(c, cx, cy, radius * scale, line);
++                c.restoreToCount(save);
++            }
++            float t = span(f, 0.58f, 1f);
++            if (t > 0f) {
++                int size = Math.round(dp(10));
++                for (float[] s : shards) {
++                    float x = cx + s[0] + s[2] * t * 0.5f, y = cy + s[1] + dp(120) * t * t + dp(30) * t;
++                    bits.setAlpha(Math.round(230 * (1f - t)));
++                    float sz = size * s[3] / 3f;
++                    r.set(x - sz, y - sz, x + sz, y + sz);
++                    c.drawBitmap(HolidayArt.glow(size, 0xFFEAF6FF, 0.3f), null, r, bits);
++                }
++            }
++        }
++    }
++
++    // ---- aurora -----------------------------------------------------------------------------------
++
++    /**
++     * Northern lights rippling across the top of the sky. Painted once at a quarter of the screen's size (they're
++     * soft anyway) and shown as one stretched bitmap, so only the fade and drift cost anything per frame.
++     */
++    static final class Aurora extends Moment {
++        private Bitmap art;
++        private final Paint p = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++
++        Aurora(Context c) {
++            super(c);
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            if (w == 0 || h == 0) return;
++            int bw = w / 4, bh = h / 4;
++            art = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888);
++            Canvas c = new Canvas(art);
++            Paint strip = new Paint();
++            int[][] colors = {{0x0000FFAA, 0x3A30F0A6, 0x1626D3C8, 0x0026D3C8},
++                    {0x0000E0FF, 0x2448E6C8, 0x1080A8FF, 0x0080A8FF},
++                    {0x00A0FF80, 0x2E58F4A0, 0x0E26D3C8, 0x0026D3C8}};
++            float[][] wave = {{0.16f, 0.07f, 1.3f, 0.2f}, {0.22f, 0.06f, 1.9f, 1.4f}, {0.12f, 0.05f, 2.6f, 2.7f}};
++            for (int k = 0; k < 3; k++) {
++                float ch = bh * (0.42f + 0.1f * k);
++                strip.setShader(new LinearGradient(0, 0, 0, ch, colors[k], new float[]{0f, 0.35f, 0.75f, 1f},
++                        Shader.TileMode.CLAMP));
++                for (int x = 0; x < bw; x += 2) {
++                    float u = x / (float) bw;
++                    float base = bh * (wave[k][0] + wave[k][1] * (float) Math.sin(u * Math.PI * 2 * wave[k][2] + wave[k][3]));
++                    float fall = 0.6f + 0.4f * (float) Math.sin(u * Math.PI * 7 + k);
++                    c.save();
++                    c.translate(x, base);
++                    c.scale(1f, fall);
++                    c.drawRect(0, 0, 2, ch, strip);
++                    c.restore();
++                }
++            }
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            if (art == null) return;
++            float a = span(f, 0f, 0.3f) * (1f - span(f, 0.75f, 1f));
++            float drift = dp(40) * (f - 0.5f);
++            p.setAlpha(Math.round(200 * a));
++            r.set(drift - dp(30), 0, getWidth() + drift + dp(30), getHeight() * (1f + 0.04f * (float) Math.sin(f * 6)));
++            c.drawBitmap(art, null, r, p);
++        }
++    }
++
++    // ---- ornament drop, star, presents --------------------------------------------------------------
++
++    /** Today's ornament falls onto the tree and bounces into place. */
++    static final class OrnamentDrop extends Moment {
++        private final float x, y, radius;
++        private final int index;
++        private final Paint spark = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++
++        OrnamentDrop(Context c, float x, float y, float radius, int index) {
++            super(c);
++            this.x = x;
++            this.y = y;
++            this.radius = radius;
++            this.index = index;
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            float t = Math.min(1f, f / 0.8f);
++            float fall = bounce(t);
++            float yy = -dp(30) + (y + dp(30)) * fall;
++            HolidayArt.LightTree.drawOrnament(c, x, yy, radius, index, d);
++            if (f > 0.55f) {
++                float s = span(f, 0.55f, 1f);
++                int size = Math.round(dp(46));
++                spark.setAlpha(Math.round(220 * (float) Math.sin(Math.PI * s)));
++                r.set(x - size / 2f, y - size / 2f, x + size / 2f, y + size / 2f);
++                c.drawBitmap(HolidayArt.glow(size, 0xFFFFE7A6, 0.08f), null, r, spark);
++            }
++        }
++
++        private static float bounce(float t) {
++            if (t < 0.6f) return (t / 0.6f) * (t / 0.6f);
++            float u = (t - 0.6f) / 0.4f;
++            return 1f - 0.08f * (float) Math.sin(Math.PI * u) * (1f - u);
++        }
++    }
++
++    /** The star on top of the tree lights up with a burst of rays. */
++    static final class StarFlare extends Moment {
++        private final float x, y;
++        private final Paint ray = HolidayIcons.stroke(0xFFFFF0C0, 1f), glowP = new Paint(Paint.FILTER_BITMAP_FLAG);
++        private final RectF r = new RectF();
++
++        StarFlare(Context c, float x, float y) {
++            super(c);
++            this.x = x;
++            this.y = y;
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            float grow = span(f, 0f, 0.45f), fade = 1f - span(f, 0.6f, 1f);
++            HolidayArt.LightTree.drawStar(c, x, y, dp(13) * (0.4f + 0.6f * grow), d);
++            int size = Math.round(dp(140) * grow);
++            if (size > 2) {
++                glowP.setAlpha(Math.round(200 * fade));
++                r.set(x - size / 2f, y - size / 2f, x + size / 2f, y + size / 2f);
++                c.drawBitmap(HolidayArt.glow(Math.round(dp(60)), 0xFFFFE6A0, 0.06f), null, r, glowP);
++            }
++            for (int i = 0; i < 12; i++) {
++                double a = i * Math.PI / 6 + f * 0.8;
++                float len = dp(i % 2 == 0 ? 60 : 36) * grow;
++                ray.setStrokeWidth(dp(i % 2 == 0 ? 1.6f : 1f));
++                ray.setAlpha(Math.round(200 * fade));
++                c.drawLine(x + (float) Math.cos(a) * dp(14), y + (float) Math.sin(a) * dp(14),
++                        x + (float) Math.cos(a) * len, y + (float) Math.sin(a) * len, ray);
++            }
++        }
++    }
++
++    /** Christmas morning: the presents drop in under the tree. */
++    static final class PresentsDrop extends Moment {
++        private final float cx, bottom;
++
++        PresentsDrop(Context c, float cx, float bottom) {
++            super(c);
++            this.cx = cx;
++            this.bottom = bottom;
++        }
++
++        @Override
++        void frame(Canvas c, float f) {
++            float t = Math.min(1f, f / 0.7f);
++            float lift = t < 0.65f ? dp(70) * (1f - (t / 0.65f) * (t / 0.65f))
++                    : dp(6) * (float) Math.sin(Math.PI * (t - 0.65f) / 0.35f);
++            int save = c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * Math.min(1f, f * 5f)));
++            HolidayArt.LightTree.drawPresents(c, cx, bottom, Math.max(0f, lift), d);
++            c.restoreToCount(save);
++        }
++    }
++
++    /** A cardinal glides in from the right and lands on the last tile's snow (the view itself stays afterwards). */
++    static void flyIn(View bird, float toX, float toY, boolean reduced, Runnable landed) {
++        if (reduced) {
++            bird.setX(toX);
++            bird.setY(toY);
++            bird.setAlpha(1f);
++            if (landed != null) landed.run();
++            return;
++        }
++        float dens = bird.getResources().getDisplayMetrics().density;
++        float fromX = ((View) bird.getParent()).getWidth() + dens * 40f;
++        float fromY = toY - dens * 150f;
++        ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
++        a.setDuration(1800);
++        a.addUpdateListener(v -> {
++            float t = (float) v.getAnimatedValue();
++            float e = 1f - (1f - t) * (1f - t);
++            bird.setX(fromX + (toX - fromX) * e);
++            float arc = (float) Math.sin(Math.PI * t) * bird.getResources().getDisplayMetrics().density * 50f;
++            bird.setY(fromY + (toY - fromY) * e - arc);
++            bird.setRotation(10f * (1f - t));
++            bird.setAlpha(Math.min(1f, t * 4f));
++        });
++        a.addListener(new AnimatorListenerAdapter() {
++            @Override
++            public void onAnimationEnd(Animator animation) {
++                bird.setRotation(0f);
++                if (landed != null) landed.run();
++            }
++        });
++        a.start();
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+index 8572285..9619749 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+@@ -364,6 +364,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         public void run() {
+             updateGreeting();
+             updateRace();
++            if (dateShort) updateWeather();   // bravia: try the full date again; fitDateLine shortens it if needed
++            else root.post(MainActivity.this::fitDateLine);
+             // The pill follows the network callbacks and each return to Home; only the diya's flame follows the
+             // signal level, so only it needs this minute's binder calls (about 7 ms on the UI thread).
+             if (festive) updateWifiLabel();
+@@ -432,6 +434,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         ambientGlow = cfg.ambientGlow;
+         appGlow = cfg.appGlow;
+         if (!ambientGlow) ambient.setVisibility(View.GONE);
++        // bravia: a Christmas theme paints its own night sky; the focused app's coloured glow would fight it.
++        if (festive && "christmas".equals(festival.name) && festival.decor("sky")) {
++            ambientGlow = false;
++            ambient.setVisibility(View.GONE);
++        }
+         heroName = findViewById(R.id.heroName);
+         hero = findViewById(R.id.hero);
+         // The hero is now a group (name, and the cinematic lines): without this every fade of the default
+@@ -794,11 +801,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         }
+         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
+         if (festive && "diwali".equals(festival.name) && !festival.decor.isEmpty()) setUpDiwali();
++        if (festive && "christmas".equals(festival.name) && !festival.decor.isEmpty()) setUpHoliday();
+ 
+         // Hide the glass when focus leaves the tiles.
+         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
+             boolean onTile = newF != null && newF.getId() == R.id.card;
+             if (!onTile) hideGlass();
++            if (holiday != null) holiday.onFocus(newF);
+         });
+ 
+         packageFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
+@@ -941,6 +950,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             recreate();
+             return;
+         }
++        if (holiday != null && !holiday.day().equals(festival.today())) {
++            recreate();   // bravia: a new day of the season (tree, gnome, moment)
++            return;
++        }
++        if (holiday != null) {
++            holiday.start();
++            root.post(this::placeHoliday);
++            handler.postDelayed(() -> {
++                if (holiday != null && !isFinishing()) holiday.firstVisit();
++            }, 700);
++        }
+         restartIdleClock();
+         promptsPaused = false;
+         if (grid.getAdapter() == null) grid.setAdapter(adapter);   // dropped by onTrimMemory
+@@ -1142,6 +1162,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         super.onPause();
+         getContentResolver().unregisterContentObserver(weatherObserver);
+         if (diwali != null) diwali.stop();
++        if (holiday != null) holiday.stop();
+         root.removeCallbacks(weatherCheck);
+         root.removeCallbacks(showIdleClock);
+         endReorder();   // Home or another app while reordering keeps the order so far
+@@ -1195,6 +1216,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     @Override
+     public void onWindowFocusChanged(boolean hasFocus) {
+         super.onWindowFocusChanged(hasFocus);
++        // bravia: the Christmas scene rests while something covers Home (the screensaver, the TV's screen-off
++        // overlay, a popup) instead of animating unseen, and carries on when Home has the screen again.
++        if (holiday != null) {
++            if (hasFocus) {
++                holiday.start();
++                handler.postDelayed(() -> {
++                    if (holiday != null && hasWindowFocus() && !isFinishing()) holiday.firstVisit();
++                }, 600);
++            } else {
++                holiday.stop();
++            }
++        }
+         if (hasFocus) {
+             startPendingSettingsReorder();
+             if (libraryFocusPending && appLibrary == null) focusLibrary();
+@@ -1205,6 +1238,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     @Override
+     protected void onDestroy() {
+         super.onDestroy();
++        if (holiday != null) holiday.release();
+         unregisterReceiver(packageReceiver);
+         wallpaperPlayer.close();
+         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
+@@ -1248,6 +1282,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+      */
+     @Override
+     public boolean dispatchKeyEvent(KeyEvent event) {
++        if (holiday != null && event.getAction() == KeyEvent.ACTION_DOWN) holiday.onUserKey();
+         if (handleSettingsKey(event)) return true;
+         if (tileMenuEnabled && !reordering && openPopup == null && cardPrompt == null
+                 && event.getKeyCode() == KeyEvent.KEYCODE_MENU) {
+@@ -1575,7 +1610,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+ 
+     @Override
+     public void onBackPressed() {
+-        // Home screen: Back goes nowhere.
++        // Home screen: Back goes nowhere. bravia: at Christmas it shakes the snow globe.
++        if (holiday != null) holiday.shake();
+     }
+ 
+     // ---- glass highlight -------------------------------------------------------------------------
+@@ -2469,9 +2505,51 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         }
+         // TextClock formats pass quoted text through, so the weather rides along as a literal.
+         String text = weatherText();
++        if (holiday != null) holiday.onWeather(text);
+         String tail = text == null ? "" : "  '\u00b7  " + text.replace("'", "''") + "'";
++        dateTail = tail;
+         date.setFormat12Hour(dateFormat12 + tail);
+         date.setFormat24Hour(dateFormat24 + tail);
++        dateShort = false;
++        date.post(this::fitDateLine);
++    }
++
++    // bravia: when the clock is wide ("10:20") the date line can run out of room and cut the weather short
++    // ("14° R..."); then the day and month are shortened instead ("SAT 14 NOV  ·  14° RAIN").
++    private String dateTail = "";
++    private boolean dateShort;
++
++    private void fitDateLine() {
++        TextClock date = findViewById(R.id.date);
++        if (date == null || dateFormat12 == null || date.getLayout() == null) return;
++        boolean cut = date.getLayout().getEllipsisCount(date.getLayout().getLineCount() - 1) > 0;
++        if (cut && !dateShort) {
++            dateShort = true;
++            date.setFormat12Hour(shortDate(dateFormat12) + dateTail);
++            date.setFormat24Hour(shortDate(dateFormat24) + dateTail);
++        }
++    }
++
++    private static String shortDate(CharSequence format) {
++        // outside quoted text, EEEE (weekday) and MMMM (month) become EEE and MMM
++        StringBuilder b = new StringBuilder();
++        boolean quoted = false;
++        String f = format.toString();
++        for (int i = 0; i < f.length(); i++) {
++            char c = f.charAt(i);
++            if (c == '\'') quoted = !quoted;
++            if (!quoted && (c == 'E' || c == 'M')) {
++                int j = i;
++                while (j < f.length() && f.charAt(j) == c) j++;
++                if (j - i >= 4) {
++                    b.append(c).append(c).append(c);
++                    i = j - 1;
++                    continue;
++                }
++            }
++            b.append(c);
++        }
++        return b.toString();
+     }
+ 
+     private String weatherText() {
+@@ -2492,6 +2570,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+ 
+     /** bravia: the Diwali decorations, while a diwali festival with festival_decor is on. */
+     private DiwaliDecor diwali;
++    /** bravia: the Christmas season (HolidayDecor), while a christmas festival with festival_decor is on. */
++    private HolidayDecor holiday;
++    private HolidayIcons.Bell xmasBell;
++    private HolidayIcons.Bauble bauble;
++    private HolidayIcons.Snowflake xmasFlake;
+     private DockDecoration dockDecoration;
+ 
+     private void setUpDiwali() {
+@@ -2538,6 +2621,42 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         diwali.placeKandil(cx);
+     }
+ 
++    /** bravia: the Christmas season's pieces; placed after each layout and as the dock moves. */
++    private void setUpHoliday() {
++        View content = grid;
++        while (content.getParent() != root && content.getParent() instanceof View) content = (View) content.getParent();
++        holiday = new HolidayDecor(this, root, festival, reducedMotion || !animations, findViewById(R.id.ambient),
++                content, dockRow ? grid : null, COLUMNS);
++        if (holiday.sweater()) {
++            for (View pill : new View[]{btnInputs, btnWifi, findViewById(R.id.btnSettings)}) {
++                pill.setBackground(new HolidayIcons.KnitPill(density));
++            }
++        }
++        if (dockDecoration != null) {
++            dockDecoration.setBandListener((band, parent) -> {
++                RectF at = null;
++                if (band != null) {
++                    int[] a = new int[2], b = new int[2];
++                    parent.getLocationInWindow(a);
++                    root.getLocationInWindow(b);
++                    at = new RectF(band);
++                    at.offset(a[0] - b[0], a[1] - b[1]);
++                }
++                RectF place = at;
++                root.post(() -> {
++                    if (holiday != null) holiday.onDockBand(place);
++                });
++            });
++            grid.invalidate();
++        }
++        root.getViewTreeObserver().addOnGlobalLayoutListener(this::placeHoliday);
++        root.post(this::placeHoliday);
++    }
++
++    private void placeHoliday() {
++        if (holiday != null) holiday.place();
++    }
++
+     private int xInRoot(View v) {
+         int[] a = new int[2], b = new int[2];
+         v.getLocationInWindow(a);
+@@ -2592,7 +2711,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             else if (hour < 22) res = R.string.good_evening;
+             else res = R.string.good_night;
+         }
+-        String festiveGreeting = festive ? festival.greetingText(getResources(), LocalDate.now()) : "";
++        String festiveGreeting = festive ? festival.greetingText(getResources(), festival.today()) : "";
++        if (holiday != null) festiveGreeting = holiday.greeting(festiveGreeting);
+         if (!festiveGreeting.isEmpty()) {
+             greeting.setText(festiveGreeting);
+             greeting.setTextColor(liftTowardsWhite(festival.accentColor(), 0.25f));
+@@ -2604,6 +2724,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         if (shamsi) shamsiDate.setText(Shamsi.today(getResources()));
+         if (lunar) lunarDate.setText(Lunar.today(getResources(), lunarOffset));
+         if (diwali != null) placeDiwali();   // bravia: the date line's length changes with the weather text
++        if (holiday != null) root.post(this::placeHoliday);
+     }
+ 
+     // ---- race-weekend panel (a theme's race_calendar) -----------------------------------------------
+@@ -2763,6 +2884,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             if (online && flame == 0) flame = 3;   // online some other way (cellular, USB tethering)
+             diya.setSteady(steady);
+             diya.setFlame(flame);
++        } else if (festive && bauble != null) {
++            bauble.setOnline(online);   // bravia: the Christmas bauble greys out while offline
+         } else {
+             if (icon != wifiIcon) {
+                 wifiIcon = icon;
+@@ -2813,6 +2936,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+      * network whose flame follows the connection, and a marigold for Settings that turns when focused.
+      */
+     private void applyFestiveSkin(TextView inputs, TextView settings) {
++        if ("christmas".equals(festival.name)) {
++            applyChristmasSkin(inputs, settings);
++            return;
++        }
+         bell = new BellDrawable(density);
+         marigold = new MarigoldDrawable(density);
+         diya = new DiyaDrawable(density);
+@@ -2826,6 +2953,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         addFocusAction(settings, marigold::turn);
+     }
+ 
++    /** bravia: a gold bell that rings for Inputs, a glass bauble for the network, a snowflake that turns for Settings. */
++    private void applyChristmasSkin(TextView inputs, TextView settings) {
++        xmasBell = new HolidayIcons.Bell(density);
++        bauble = new HolidayIcons.Bauble(density);
++        xmasFlake = new HolidayIcons.Snowflake(density);
++        xmasBell.setReducedMotion(reducedMotion);
++        bauble.setReducedMotion(reducedMotion);
++        xmasFlake.setReducedMotion(reducedMotion);
++        setFestiveIcon(inputs, xmasBell);
++        setFestiveIcon(btnWifi, bauble);
++        setFestiveIcon(settings, xmasFlake);
++        addFocusAction(inputs, xmasBell::swing);
++        addFocusAction(btnWifi, bauble::swing);
++        addFocusAction(settings, xmasFlake::turn);
++    }
++
+     private static void setFestiveIcon(TextView pill, Drawable icon) {
+         // The pills tint their icons to follow focus; the festive ones keep their own colours.
+         pill.setCompoundDrawableTintList(null);

@@ -1,0 +1,15 @@
+{
+  "url": "http://192.168.1.10:8123",
+  "token": "paste-a-long-lived-access-token-here",
+  "glance": [
+    "weather.forecast_home"
+  ],
+  "exclude": [
+    "light.*_segment_*",
+    "switch.*_child_lock",
+    "input_boolean.front_door_rang"
+  ],
+  "summary": {
+    "doorbell": "automation.tv_doorbell_pop_up"
+  }
+}

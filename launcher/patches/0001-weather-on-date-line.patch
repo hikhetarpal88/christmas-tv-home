@@ -1,0 +1,93 @@
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+index 880d15f..5c649da 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+@@ -17,6 +17,7 @@ import android.content.pm.ResolveInfo;
+ import android.content.pm.ChangedPackages;
+ import android.content.res.ColorStateList;
+ import android.content.res.Resources;
++import android.database.ContentObserver;
+ import android.graphics.Bitmap;
+ import android.graphics.Canvas;
+ import android.graphics.Color;
+@@ -47,6 +48,7 @@ import android.os.HandlerThread;
+ import android.os.Looper;
+ import android.os.SystemClock;
+ import android.provider.Settings;
++import android.widget.TextClock;
+ import android.text.SpannableString;
+ import android.text.Spanned;
+ import android.text.TextPaint;
+@@ -916,6 +918,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     @Override
+     protected void onResume() {
+         super.onResume();
++        getContentResolver().registerContentObserver(Settings.Global.getUriFor(WEATHER_KEY), false, weatherObserver);
++        root.post(weatherCheck);
+         // A festival that started or ended while Home was in the background: rebuild with or without it.
+         if (festive != festival.active(LocalDate.now())) {
+             recreate();
+@@ -1127,6 +1131,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     @Override
+     protected void onPause() {
+         super.onPause();
++        getContentResolver().unregisterContentObserver(weatherObserver);
++        root.removeCallbacks(weatherCheck);
+         root.removeCallbacks(showIdleClock);
+         endReorder();   // Home or another app while reordering keeps the order so far
+         wallpaperPlayer.stop();
+@@ -2424,6 +2430,54 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     /** Some TVs (Coocaa OS) set the network time without ACTION_TIME_CHANGED, so keep checking until it is valid. */
+     private final Runnable clockCheck = this::updateClockVisibility;
+ 
++    // Weather on the date line ("SUNDAY 25 OCTOBER · 12° CLOUDY"). The launcher stays offline: a machine
++    // on the LAN writes Settings.Global bravia_weather = "<epoch seconds>|<text>" over ADB (for example
++    // home-assistant/push-weather.sh), and a reading older than three hours is dropped rather than shown stale.
++    private static final String WEATHER_KEY = "bravia_weather";
++    private static final long WEATHER_MAX_AGE_S = 3 * 3600;
++    private CharSequence dateFormat12, dateFormat24;
++    private final ContentObserver weatherObserver = new ContentObserver(new Handler(Looper.getMainLooper())) {
++        @Override
++        public void onChange(boolean selfChange) {
++            updateWeather();
++        }
++    };
++    private final Runnable weatherCheck = new Runnable() {
++        @Override
++        public void run() {
++            updateWeather();
++            root.postDelayed(this, 10 * 60 * 1000L);   // also ages out a reading nobody refreshed
++        }
++    };
++
++    private void updateWeather() {
++        TextClock date = findViewById(R.id.date);
++        if (date == null) return;
++        if (dateFormat12 == null) {
++            dateFormat12 = date.getFormat12Hour();
++            dateFormat24 = date.getFormat24Hour();
++        }
++        // TextClock formats pass quoted text through, so the weather rides along as a literal.
++        String text = weatherText();
++        String tail = text == null ? "" : "  '\u00b7  " + text.replace("'", "''") + "'";
++        date.setFormat12Hour(dateFormat12 + tail);
++        date.setFormat24Hour(dateFormat24 + tail);
++    }
++
++    private String weatherText() {
++        String v = Settings.Global.getString(getContentResolver(), WEATHER_KEY);
++        int bar = v == null ? -1 : v.indexOf('|');
++        if (bar <= 0) return null;
++        try {
++            long age = System.currentTimeMillis() / 1000 - Long.parseLong(v.substring(0, bar).trim());
++            if (age > WEATHER_MAX_AGE_S) return null;
++        } catch (NumberFormatException e) {
++            return null;
++        }
++        String text = v.substring(bar + 1).trim();
++        return text.isEmpty() || text.length() > 32 ? null : text;
++    }
++
+     private void updateClockVisibility() {
+         boolean valid = System.currentTimeMillis() >= TIME_VALID_AFTER_MS;
+         clockBlock.setVisibility(valid ? View.VISIBLE : View.INVISIBLE);

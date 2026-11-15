@@ -1,0 +1,1029 @@
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Config.java b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+index be67171..c2330d3 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Config.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
+@@ -620,7 +620,9 @@ final class Config {
+         }
+         // A festive skin comes only from a theme; config.xml has no festival.
+         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
+-                string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""));
++                string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""),
++                json.optJSONObject("festival_days"), json.optJSONArray("festival_decor"),
++                json.optJSONArray("festival_fireworks"));
+ 
+         return new Config(dock, fillDock, hidden, libraryApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
+                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputUriScheme, Math.max(1, columns),
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/DiwaliDecor.java b/launcher/app/src/main/java/com/gathin/tvhome/DiwaliDecor.java
+new file mode 100644
+index 0000000..ad375bf
+--- /dev/null
++++ b/launcher/app/src/main/java/com/gathin/tvhome/DiwaliDecor.java
+@@ -0,0 +1,722 @@
++package com.gathin.tvhome;
++
++import android.animation.ObjectAnimator;
++import android.animation.ValueAnimator;
++import android.app.Activity;
++import android.content.Context;
++import android.graphics.Canvas;
++import android.graphics.LinearGradient;
++import android.graphics.Paint;
++import android.graphics.Path;
++import android.graphics.RadialGradient;
++import android.graphics.RectF;
++import android.graphics.Shader;
++import android.graphics.drawable.GradientDrawable;
++import android.os.SystemClock;
++import android.util.DisplayMetrics;
++import android.view.Gravity;
++import android.view.View;
++import android.view.ViewGroup;
++import android.view.animation.LinearInterpolator;
++import android.widget.FrameLayout;
++
++import java.time.LocalDate;
++import java.time.LocalTime;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Diwali decorations (bravia), each switched on by name in the theme's festival_decor:
++ * <ul>
++ * <li>"toran": a marigold garland along the top edge, mango leaves at each swag;</li>
++ * <li>"kandil": a star lantern hanging between the date and the top bar's pills, swaying, its light flickering;</li>
++ * <li>"diyas": oil lamps standing on the dock's top edge, flames flickering out of step;</li>
++ * <li>"lights": soft golden lights drifting behind everything;</li>
++ * <li>"fireworks": a six-second show the first time Home opens after 17:00 on a festival_fireworks night, at most
++ * every 20 minutes.</li>
++ * </ul>
++ * Reduced motion keeps the decorations and stills them, and skips the fireworks. Everything pauses while Home is
++ * in the background. The views take no focus and are hidden from accessibility.
++ *
++ * Cheap on this TV's GPU: what doesn't change is drawn once into a hardware layer (the garland, the lantern, the
++ * diyas' bowls), and what moves is animated as view properties (rotation, scale, alpha), so a frame is compositing,
++ * not redrawing. Measured on the XR-75X90L: redrawing seven full diya drawables took frames from 12 ms to 21 ms.
++ */
++final class DiwaliDecor {
++    private static final long FIREWORKS_GAP_MS = 20 * 60_000L;
++    /** elapsedRealtime of the last show; static, so recreate() doesn't replay it. */
++    private static long lastFireworks = -FIREWORKS_GAP_MS;
++
++    private final Activity activity;
++    private final FrameLayout root;
++    private final Festival festival;
++    private final boolean reduced;
++    private final float d;
++    private ToranView toran;
++    private KandilView kandil;
++    private View kandilGlow;
++    /** The lantern and its glow together, so they're placed and faded as one. */
++    private FrameLayout kandilBox;
++    private boolean kandilClear = true;
++    private DiyaRow diyas;
++    private final List<ObjectAnimator> drift = new ArrayList<>();
++    private ValueAnimator sway;
++
++    /**
++     * @param behind the layer the lights go just above (the ambient glow), so they stay behind the shelf and tiles
++     * @param content root's child that holds the top bar and the grid; the lantern goes just below it, so its string
++     *                passes behind the text
++     */
++    DiwaliDecor(Activity activity, FrameLayout root, Festival festival, boolean reducedMotion, View behind, View content) {
++        this.activity = activity;
++        this.root = root;
++        this.festival = festival;
++        this.reduced = reducedMotion;
++        d = activity.getResources().getDisplayMetrics().density;
++
++        if (festival.decor("lights")) addLights(behind);
++        if (festival.decor("kandil")) {
++            kandil = new KandilView(activity);
++            kandilGlow = new KandilView.Glow(activity);
++            kandilBox = new FrameLayout(activity);
++            kandilBox.addView(quiet(kandilGlow), new FrameLayout.LayoutParams(dp(110), dp(230)));
++            kandilBox.addView(quiet(kandil), new FrameLayout.LayoutParams(dp(110), dp(230)));
++            root.addView(quiet(kandilBox), Math.max(0, root.indexOfChild(content)), kandilParams());
++        }
++        if (festival.decor("toran")) {
++            toran = new ToranView(activity);
++            root.addView(quiet(toran), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(30), Gravity.TOP));
++        }
++        if (festival.decor("diyas")) {
++            diyas = new DiyaRow(activity);
++            diyas.setVisibility(View.INVISIBLE);
++            root.addView(quiet(diyas), new FrameLayout.LayoutParams(dp(800), dp(36), Gravity.TOP | Gravity.LEFT));
++        }
++    }
++
++    private FrameLayout.LayoutParams kandilParams() {
++        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(110), dp(230), Gravity.TOP | Gravity.LEFT);
++        lp.leftMargin = dp(458);
++        return lp;
++    }
++
++    private static View quiet(View v) {
++        v.setFocusable(false);
++        v.setClickable(false);
++        v.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
++        return v;
++    }
++
++    void start() {
++        if (diyas != null) diyas.start(reduced);
++        if (reduced) return;
++        if (kandil != null) {
++            if (sway == null) {
++                sway = ValueAnimator.ofFloat(0f, 1f);
++                sway.setDuration(5600);
++                sway.setRepeatCount(ValueAnimator.INFINITE);
++                sway.setInterpolator(new LinearInterpolator());
++                sway.addUpdateListener(a -> {
++                    double f = 2 * Math.PI * a.getAnimatedFraction();
++                    float rotation = (float) (3.2 * Math.sin(f));   // a 3 degree swing about the cord's top
++                    kandil.setRotation(rotation);
++                    kandilGlow.setRotation(rotation);
++                    kandilGlow.setAlpha(0.78f + 0.12f * (float) Math.sin(3 * f) + 0.08f * (float) Math.sin(7 * f + 1.3));
++                });
++                sway.start();
++            } else {
++                sway.resume();
++            }
++        }
++        for (ObjectAnimator a : drift) {
++            if (a.isStarted()) a.resume();
++            else a.start();
++        }
++    }
++
++    void stop() {
++        if (diyas != null) diyas.stop();
++        if (sway != null) sway.pause();
++        for (ObjectAnimator a : drift) a.pause();
++    }
++
++    /**
++     * The dock band's rectangle in root's coordinates, or null when the dock has scrolled away. The diyas stand on
++     * it; the lantern shows only while the dock rests at the bottom, and fades while the grid's rows scroll up into
++     * the space it hangs in.
++     */
++    void onDockBand(RectF band) {
++        if (diyas != null) diyas.place(band);
++        if (kandilBox == null) return;
++        boolean clear = band != null && band.top > dp(222);
++        if (clear == kandilClear) return;
++        kandilClear = clear;
++        kandilBox.animate().alpha(clear ? 1f : 0f).setDuration(reduced ? 0 : 220).start();
++    }
++
++    /** Hangs the lantern with its cord at x (root's pixels). */
++    void placeKandil(int x) {
++        if (kandilBox == null) return;
++        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) kandilBox.getLayoutParams();
++        int left = Math.round(x - lp.width / 2f);
++        if (lp.leftMargin != left) {
++            lp.leftMargin = left;
++            kandilBox.setLayoutParams(lp);
++        }
++    }
++
++    /** On Home: the show, on a fireworks night from 17:00, unless one played in the last 20 minutes. */
++    void maybeFireworks() {
++        if (reduced || !festival.decor("fireworks") || activity.isFinishing()) return;
++        if (!festival.fireworksNight(LocalDate.now()) || LocalTime.now().isBefore(LocalTime.of(17, 0))) return;
++        long now = SystemClock.elapsedRealtime();
++        if (now - lastFireworks < FIREWORKS_GAP_MS) return;
++        lastFireworks = now;
++        FireworksView show = new FireworksView(activity);
++        root.addView(quiet(show), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
++                ViewGroup.LayoutParams.MATCH_PARENT));
++        show.play(6000, () -> root.removeView(show));
++    }
++
++    // ---- golden lights --------------------------------------------------------------------------
++
++    /** Soft golden discs at fixed spots, each drifting and breathing on its own slow loop (render-thread cheap). */
++    private void addLights(View behind) {
++        DisplayMetrics m = activity.getResources().getDisplayMetrics();
++        Random rnd = new Random(0xD1A1L);
++        int at = root.indexOfChild(behind) + 1;
++        for (int i = 0; i < 14; i++) {
++            int size = dp(40 + rnd.nextInt(120));
++            View orb = new View(activity);
++            GradientDrawable g = new GradientDrawable();
++            g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
++            g.setGradientRadius(size / 2f);
++            boolean bright = rnd.nextInt(4) == 0;
++            g.setColors(bright ? new int[] {0x55FFE2A0, 0x26FFC25A, 0x00FFB23C} : new int[] {0x30FFD27A, 0x14FFB23C, 0x00FFB23C});
++            orb.setBackground(g);
++            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size, Gravity.TOP | Gravity.LEFT);
++            lp.leftMargin = Math.round(rnd.nextFloat() * (m.widthPixels - size));
++            lp.topMargin = Math.round(rnd.nextFloat() * (m.heightPixels - size));
++            root.addView(quiet(orb), at++, lp);
++            if (reduced) continue;
++            drift.add(loop(orb, "translationX", dp(30 + rnd.nextInt(60)) * (rnd.nextBoolean() ? 1 : -1), 18_000 + rnd.nextInt(22_000)));
++            drift.add(loop(orb, "translationY", -dp(20 + rnd.nextInt(50)), 20_000 + rnd.nextInt(20_000)));
++            ObjectAnimator breathe = ObjectAnimator.ofFloat(orb, "alpha", 1f, 0.35f + rnd.nextFloat() * 0.3f);
++            breathe.setDuration(5_000 + rnd.nextInt(7_000));
++            breathe.setRepeatCount(ValueAnimator.INFINITE);
++            breathe.setRepeatMode(ValueAnimator.REVERSE);
++            drift.add(breathe);
++        }
++    }
++
++    private static ObjectAnimator loop(View v, String property, float to, long ms) {
++        ObjectAnimator a = ObjectAnimator.ofFloat(v, property, 0f, to);
++        a.setDuration(ms);
++        a.setRepeatCount(ValueAnimator.INFINITE);
++        a.setRepeatMode(ValueAnimator.REVERSE);
++        return a;
++    }
++
++    private int dp(int v) {
++        return Math.round(v * d);
++    }
++
++    // ---- toran ----------------------------------------------------------------------------------
++
++    /** A marigold garland in shallow swags along the top edge, mango leaves hanging at the bottom of each swag. */
++    static final class ToranView extends View {
++        private static final int[][] SHADES = {
++                {0xFFFF8C1A, 0xFFF26A0D, 0xFFB84A00},   // orange: body, petals, heart
++                {0xFFFFBE2E, 0xFFF59E0B, 0xFFCC7A00},   // yellow
++        };
++        private final float d;
++        private final Paint cord = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint leaf = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint vein = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Path string = new Path();
++        private final Path leafShape = new Path();
++        private float[] flowers = new float[0];   // x, y, r, shade, seed
++        private float[] leaves = new float[0];    // x, y, degrees
++
++        ToranView(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            cord.setStyle(Paint.Style.STROKE);
++            cord.setStrokeWidth(1.2f * d);
++            cord.setColor(0xFFB8873E);
++            leaf.setColor(0xFF3A8F3F);
++            vein.setStyle(Paint.Style.STROKE);
++            vein.setStrokeWidth(0.8f * d);
++            vein.setColor(0xFF23602A);
++            setLayerType(LAYER_TYPE_HARDWARE, null);   // drawn once, composited every frame after that
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            super.onSizeChanged(w, h, ow, oh);
++            int swags = Math.max(2, Math.round(w / (240 * d)));
++            float sw = w / (float) swags, top = 2 * d, low = 11.5f * d, ctrl = 2 * low - top;
++            string.reset();
++            List<float[]> fl = new ArrayList<>();
++            List<float[]> lv = new ArrayList<>();
++            int n = 0;
++            for (int s = 0; s < swags; s++) {
++                float x0 = s * sw, x1 = x0 + sw, xm = x0 + sw / 2f;
++                string.moveTo(x0, top);
++                string.quadTo(xm, ctrl, x1, top);
++                int count = Math.max(4, Math.round(sw / (17 * d)));
++                for (int k = 0; k <= count; k++) {
++                    if (s > 0 && k == 0) continue;   // the joint was drawn as the last flower of the swag before
++                    float t = k / (float) count, u = 1 - t;
++                    float x = u * u * x0 + 2 * u * t * xm + t * t * x1;
++                    float y = u * u * top + 2 * u * t * ctrl + t * t * top;
++                    boolean knot = k == 0 || k == count;
++                    fl.add(new float[] {x, y, (knot ? 6.5f : 5.4f) * d, n++ % 2, n * 0.7f});
++                }
++                for (float deg : new float[] {-28f, 0f, 28f}) lv.add(new float[] {xm, low + 4 * d, deg});
++            }
++            flowers = flatten(fl);
++            leaves = flatten(lv);
++            float len = 9 * d, half = 3.4f * d;
++            leafShape.reset();
++            leafShape.moveTo(0, 0);
++            leafShape.quadTo(half, len * 0.45f, 0, len);
++            leafShape.quadTo(-half, len * 0.45f, 0, 0);
++        }
++
++        private static float[] flatten(List<float[]> items) {
++            int w = items.isEmpty() ? 0 : items.get(0).length;
++            float[] out = new float[items.size() * w];
++            for (int i = 0; i < items.size(); i++) System.arraycopy(items.get(i), 0, out, i * w, w);
++            return out;
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            for (int i = 0; i < leaves.length; i += 3) {
++                c.save();
++                c.translate(leaves[i], leaves[i + 1]);
++                c.rotate(leaves[i + 2]);
++                c.drawPath(leafShape, leaf);
++                c.drawLine(0, 0, 0, 8 * d, vein);
++                c.restore();
++            }
++            c.drawPath(string, cord);
++            for (int i = 0; i < flowers.length; i += 5) {
++                float x = flowers[i], y = flowers[i + 1], r = flowers[i + 2], seed = flowers[i + 4];
++                int[] s = SHADES[(int) flowers[i + 3]];
++                fill.setColor(s[1]);
++                for (int k = 0; k < 9; k++) {
++                    double a = k * Math.PI * 2 / 9 + seed;
++                    c.drawCircle(x + (float) Math.cos(a) * r * 0.62f, y + (float) Math.sin(a) * r * 0.62f, r * 0.46f, fill);
++                }
++                fill.setColor(s[0]);
++                c.drawCircle(x, y, r * 0.7f, fill);
++                fill.setColor(s[2]);
++                c.drawCircle(x, y, r * 0.26f, fill);
++                fill.setColor(0x5AFFFFFF);
++                c.drawCircle(x - r * 0.26f, y - r * 0.3f, r * 0.14f, fill);
++            }
++        }
++    }
++
++    // ---- kandil ---------------------------------------------------------------------------------
++
++    /** A five-point star lantern on a cord from the top edge, its light inside, three tassels below. Static, so it
++     *  lives in a hardware layer; the sway is the view's rotation about the cord's top. */
++    static final class KandilView extends View {
++        private final float d;
++        private final Paint cord = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint outer = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint inner = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint light = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint tassel = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint bead = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Path outerStar = new Path();
++        private final Path innerStar = new Path();
++        private float cx, cy;
++
++        KandilView(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            cord.setStyle(Paint.Style.STROKE);
++            cord.setStrokeWidth(1.2f * d);
++            cord.setColor(0xFFC9A46A);
++            rim.setStyle(Paint.Style.STROKE);
++            rim.setStrokeWidth(1.2f * d);
++            rim.setStrokeJoin(Paint.Join.ROUND);
++            rim.setColor(0xFFA63A0C);
++            inner.setColor(0xFFFFB627);
++            light.setColor(0xFFFFF3D0);
++            tassel.setStyle(Paint.Style.STROKE);
++            tassel.setStrokeWidth(1.4f * d);
++            tassel.setStrokeCap(Paint.Cap.ROUND);
++            tassel.setColor(0xFFFFC94D);
++            bead.setColor(0xFFE8601C);
++            setLayerType(LAYER_TYPE_HARDWARE, null);
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            super.onSizeChanged(w, h, ow, oh);
++            cx = w / 2f;
++            cy = 150 * d;
++            setPivotX(cx);
++            setPivotY(0);
++            star(outerStar, 26 * d, 12 * d);
++            star(innerStar, 17 * d, 8 * d);
++            outer.setShader(new LinearGradient(0, cy - 26 * d, 0, cy + 22 * d, 0xFFFF8A3D, 0xFFC8450F, Shader.TileMode.CLAMP));
++        }
++
++        private void star(Path p, float big, float small) {
++            p.reset();
++            for (int i = 0; i < 10; i++) {
++                double a = Math.toRadians(-90 + i * 36);
++                float r = i % 2 == 0 ? big : small;
++                float x = cx + (float) Math.cos(a) * r, y = cy + (float) Math.sin(a) * r;
++                if (i == 0) p.moveTo(x, y);
++                else p.lineTo(x, y);
++            }
++            p.close();
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            c.drawLine(cx, 0, cx, cy - 26 * d, cord);
++            float bottom = cy + 12 * d;   // the notch between the star's two lower points
++            c.drawLine(cx, bottom, cx, bottom + 46 * d, tassel);
++            c.drawLine(cx - 15 * d, cy + 21 * d, cx - 18 * d, cy + 50 * d, tassel);
++            c.drawLine(cx + 15 * d, cy + 21 * d, cx + 18 * d, cy + 50 * d, tassel);
++            c.drawCircle(cx, bottom + 47 * d, 2.6f * d, bead);
++            c.drawCircle(cx - 18 * d, cy + 51 * d, 2.4f * d, bead);
++            c.drawCircle(cx + 18 * d, cy + 51 * d, 2.4f * d, bead);
++            c.drawPath(outerStar, outer);
++            c.drawPath(outerStar, rim);
++            c.drawPath(innerStar, inner);
++            c.drawCircle(cx, cy, 5.5f * d, light);
++        }
++
++        /** The lantern's warm glow, its own cached layer behind the lantern: the flicker is this view's alpha. */
++        static final class Glow extends View {
++            private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final float d;
++
++            Glow(Context c) {
++                super(c);
++                d = c.getResources().getDisplayMetrics().density;
++                setLayerType(LAYER_TYPE_HARDWARE, null);
++            }
++
++            @Override
++            protected void onSizeChanged(int w, int h, int ow, int oh) {
++                super.onSizeChanged(w, h, ow, oh);
++                setPivotX(w / 2f);
++                setPivotY(0);
++                glow.setShader(new RadialGradient(w / 2f, 150 * d, 52 * d, new int[] {0x99FFB23C, 0x40FF8A1A, 0x00FF8A1A},
++                        new float[] {0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
++            }
++
++            @Override
++            protected void onDraw(Canvas c) {
++                c.drawCircle(getWidth() / 2f, 150 * d, 52 * d, glow);
++            }
++        }
++    }
++
++    // ---- diyas on the dock ----------------------------------------------------------------------
++
++    /**
++     * Seven diyas standing on the dock band's top edge. The painted bowls are drawn once (a hardware layer); each
++     * flame is a small view whose height, width, lean and glow are animated as view properties, every flame on its
++     * own rhythm, so a flicker costs a transform on the render thread rather than a redraw.
++     */
++    static final class DiyaRow extends FrameLayout {
++        private static final int COUNT = 7;
++        private final float d;
++        private final Bowls bowls;
++        private final View[] flames = new View[COUNT];
++        private final View[] glows = new View[COUNT];
++        private final List<ObjectAnimator> flicker = new ArrayList<>();
++        private boolean reduced;
++
++        DiyaRow(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            setClipChildren(false);
++            bowls = new Bowls(c, COUNT);
++            addView(bowls, new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
++            Random rnd = new Random(0xD1A5L);
++            for (int i = 0; i < COUNT; i++) {
++                View glow = new View(c);
++                GradientDrawable g = new GradientDrawable();
++                g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
++                g.setGradientRadius(15 * d);
++                g.setColors(new int[] {0x8CFFB23C, 0x2EFF8A1A, 0x00FF8A1A});
++                glow.setBackground(g);
++                addView(glow, new LayoutParams(Math.round(30 * d), Math.round(30 * d)));
++                View flame = new Flame(c);
++                addView(flame, new LayoutParams(Math.round(8 * d), Math.round(14 * d)));
++                glows[i] = glow;
++                flames[i] = flame;
++                flicker.add(loop(flame, "scaleY", 1.12f, 0.86f, 300 + rnd.nextInt(420)));
++                flicker.add(loop(flame, "scaleX", 0.92f, 1.05f, 420 + rnd.nextInt(520)));
++                flicker.add(loop(flame, "rotation", -5f, 5f, 900 + rnd.nextInt(1000)));
++                flicker.add(loop(glow, "alpha", 1f, 0.55f, 260 + rnd.nextInt(520)));
++            }
++        }
++
++        private static ObjectAnimator loop(View v, String property, float from, float to, long ms) {
++            ObjectAnimator a = ObjectAnimator.ofFloat(v, property, from, to);
++            a.setDuration(ms);
++            a.setRepeatCount(ValueAnimator.INFINITE);
++            a.setRepeatMode(ValueAnimator.REVERSE);
++            a.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
++            return a;
++        }
++
++        void start(boolean reducedMotion) {
++            reduced = reducedMotion;
++            if (reduced) return;
++            for (ObjectAnimator a : flicker) {
++                if (a.isStarted()) a.resume();
++                else a.start();
++            }
++        }
++
++        void stop() {
++            for (ObjectAnimator a : flicker) a.pause();
++        }
++
++        void place(RectF band) {
++            if (band == null || band.width() < 100 * d) {
++                setVisibility(INVISIBLE);
++                return;
++            }
++            ViewGroup.LayoutParams lp = getLayoutParams();
++            int w = Math.round(band.width());
++            if (lp.width != w) {
++                lp.width = w;
++                setLayoutParams(lp);
++            }
++            setX(band.left);
++            setY(band.top - 33 * d);   // the bowls' feet a little over the band's edge, so they stand on it
++            setVisibility(VISIBLE);
++        }
++
++        @Override
++        protected void onSizeChanged(int w, int h, int ow, int oh) {
++            super.onSizeChanged(w, h, ow, oh);
++            for (int i = 0; i < COUNT; i++) {
++                float x = Bowls.wickX(i, COUNT, w, d), y = Bowls.wickY(h, d);
++                View f = flames[i];
++                f.setPivotX(4 * d);
++                f.setPivotY(14 * d);   // the flame's base, at the wick
++                f.setX(x - 4 * d);
++                f.setY(y - 14 * d);
++                glows[i].setX(x - 15 * d);
++                glows[i].setY(y - 7 * d - 15 * d);   // centred on the flame
++            }
++        }
++
++        /** One flame: a teardrop, white-gold at the tip to orange at the base, with a pale core. */
++        static final class Flame extends View {
++            private final Paint body = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint core = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Path outer = new Path();
++            private final Path inner = new Path();
++
++            Flame(Context c) {
++                super(c);
++                core.setColor(0xD9FFFBEA);
++            }
++
++            @Override
++            protected void onSizeChanged(int w, int h, int ow, int oh) {
++                super.onSizeChanged(w, h, ow, oh);
++                drop(outer, w / 2f, 0, w / 2f, h);
++                drop(inner, w / 2f, h * 0.45f, w * 0.26f, h * 0.55f);
++                body.setShader(new LinearGradient(0, 0, 0, h, new int[] {0xFFFFF6D0, 0xFFFFC94D, 0xFFFF7A1A},
++                        new float[] {0f, 0.45f, 1f}, Shader.TileMode.CLAMP));
++            }
++
++            /** A teardrop with its tip at (cx, top) and its round base filling half-width hw down to top + height. */
++            private static void drop(Path p, float cx, float top, float hw, float height) {
++                p.reset();
++                p.moveTo(cx, top);
++                p.cubicTo(cx + hw * 0.35f, top + height * 0.35f, cx + hw, top + height * 0.6f, cx + hw * 0.85f, top + height * 0.82f);
++                p.quadTo(cx, top + height * 1.1f, cx - hw * 0.85f, top + height * 0.82f);
++                p.cubicTo(cx - hw, top + height * 0.6f, cx - hw * 0.35f, top + height * 0.35f, cx, top);
++                p.close();
++            }
++
++            @Override
++            protected void onDraw(Canvas c) {
++                c.drawPath(outer, body);
++                c.drawPath(inner, core);
++            }
++        }
++
++        /** The seven clay bowls with their oil and spouts, painted dots, drawn once. */
++        static final class Bowls extends View {
++            private final int count;
++            private final float d;
++            private final Paint clay = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint lip = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint oil = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Paint dots = new Paint(Paint.ANTI_ALIAS_FLAG);
++            private final Path bowl = new Path();
++            private final Path spout = new Path();
++
++            Bowls(Context c, int count) {
++                super(c);
++                this.count = count;
++                d = c.getResources().getDisplayMetrics().density;
++                lip.setColor(0xFF6E2C14);
++                oil.setColor(0xFFB8701E);
++                dots.setColor(0xFFF2B33D);
++                setLayerType(LAYER_TYPE_HARDWARE, null);
++            }
++
++            /** The wick, at the tip of the spout on each bowl's right. */
++            static float wickX(int i, int count, int w, float d) {
++                float pad = 46 * d;
++                return pad + i * (w - 2 * pad) / (count - 1) + 12 * d;
++            }
++
++            static float wickY(int h, float d) {
++                return h - 3 * d - 7 * d - 2.5f * d;
++            }
++
++            @Override
++            protected void onSizeChanged(int w, int h, int ow, int oh) {
++                super.onSizeChanged(w, h, ow, oh);
++                float rim = h - 3 * d - 7 * d;
++                clay.setShader(new LinearGradient(0, rim, 0, rim + 7 * d, 0xFFD9763A, 0xFF8E3E1E, Shader.TileMode.CLAMP));
++            }
++
++            @Override
++            protected void onDraw(Canvas c) {
++                int w = getWidth(), h = getHeight();
++                float rim = h - 3 * d - 7 * d;
++                for (int i = 0; i < count; i++) {
++                    float cx = wickX(i, count, w, d) - 12 * d;
++                    spout.reset();
++                    spout.moveTo(cx + 8 * d, rim - 1.5f * d);
++                    spout.lineTo(cx + 13.5f * d, rim - 3.2f * d);
++                    spout.lineTo(cx + 10 * d, rim + 2 * d);
++                    spout.close();
++                    c.drawPath(spout, clay);
++                    bowl.reset();
++                    bowl.moveTo(cx - 11 * d, rim);
++                    bowl.quadTo(cx, rim + 14 * d, cx + 11 * d, rim);
++                    bowl.close();
++                    c.drawPath(bowl, clay);
++                    c.drawOval(cx - 11 * d, rim - 2 * d, cx + 11 * d, rim + 2 * d, lip);
++                    c.drawOval(cx - 9 * d, rim - 1.2f * d, cx + 9 * d, rim + 1.2f * d, oil);
++                    for (int k = -1; k <= 1; k++) c.drawCircle(cx + k * 4.5f * d, rim + 3.6f * d, 0.9f * d, dots);
++                }
++            }
++        }
++    }
++
++    // ---- fireworks --------------------------------------------------------------------------------
++
++    /** Five rockets rise and burst over the top of the screen, sparks falling and crackling out, then it's gone. */
++    static final class FireworksView extends View {
++        private static final int BURSTS = 5, SPARKS = 64;
++        private static final int[][] PALETTES = {
++                {0xFFFFD27A, 0xFFFFB23C, 0xFFFFF3D6},   // gold
++                {0xFFFF6B8A, 0xFFFFB3C6, 0xFFFFE6EE},   // rose
++                {0xFF7CE0FF, 0xFFBFF1FF, 0xFFFFFFFF},   // ice
++                {0xFFB4FF8A, 0xFFE2FFCF, 0xFFFFFFFF},   // green
++        };
++        private final float d;
++        private final Random rnd = new Random();
++        private final Paint spark = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final Paint flash = new Paint(Paint.ANTI_ALIAS_FLAG);
++        private final float[] bx = new float[BURSTS], by = new float[BURSTS], at = new float[BURSTS];
++        private final float[] vx = new float[BURSTS * SPARKS], vy = new float[BURSTS * SPARKS],
++                life = new float[BURSTS * SPARKS], phase = new float[BURSTS * SPARKS];
++        private final int[] color = new int[BURSTS * SPARKS];
++        private long start, duration;
++        private Runnable done;
++
++        FireworksView(Context c) {
++            super(c);
++            d = c.getResources().getDisplayMetrics().density;
++            spark.setStyle(Paint.Style.STROKE);
++            spark.setStrokeCap(Paint.Cap.ROUND);
++            spark.setStrokeWidth(2.2f * d);
++        }
++
++        void play(long durationMs, Runnable onDone) {
++            duration = durationMs;
++            done = onDone;
++            DisplayMetrics m = getResources().getDisplayMetrics();
++            for (int b = 0; b < BURSTS; b++) {
++                at[b] = 0.7f + b * 0.8f + rnd.nextFloat() * 0.3f;
++                bx[b] = m.widthPixels * (0.22f + rnd.nextFloat() * 0.56f);
++                by[b] = m.heightPixels * (0.1f + rnd.nextFloat() * 0.3f);
++                int[] pal = PALETTES[rnd.nextInt(PALETTES.length)];
++                for (int k = 0; k < SPARKS; k++) {
++                    int i = b * SPARKS + k;
++                    double a = 2 * Math.PI * k / SPARKS + rnd.nextFloat() * 0.12;
++                    float speed = (140 + rnd.nextFloat() * 120) * d;
++                    vx[i] = (float) Math.cos(a) * speed;
++                    vy[i] = (float) Math.sin(a) * speed;
++                    life[i] = 1.4f + rnd.nextFloat() * 0.7f;
++                    phase[i] = rnd.nextFloat() * 6f;
++                    color[i] = pal[rnd.nextInt(pal.length)];
++                }
++            }
++            start = SystemClock.uptimeMillis();
++            postInvalidateOnAnimation();
++        }
++
++        @Override
++        protected void onDraw(Canvas c) {
++            long ms = SystemClock.uptimeMillis() - start;
++            if (ms > duration) {
++                if (done != null) post(done);
++                done = null;
++                return;
++            }
++            float t = ms / 1000f, h = getHeight(), g = 70 * d, k = 1.6f;
++            for (int b = 0; b < BURSTS; b++) {
++                float bt = t - at[b];
++                if (bt < -0.7f) continue;
++                if (bt < 0) {   // the rocket rising to its burst point
++                    float p = 1 - (float) Math.pow(-bt / 0.7f, 2);
++                    float y = h - (h - by[b]) * p;
++                    spark.setColor(0xFFFFE7B0);
++                    spark.setAlpha(210);
++                    c.drawLine(bx[b], y, bx[b], y + 20 * d, spark);
++                    continue;
++                }
++                if (bt < 0.16f) {
++                    flash.setColor(0xFFFFF3D6);
++                    flash.setAlpha(Math.round(200 * (1 - bt / 0.16f)));
++                    c.drawCircle(bx[b], by[b], 22 * d * (0.4f + bt / 0.16f), flash);
++                }
++                for (int s = 0; s < SPARKS; s++) {
++                    int i = b * SPARKS + s;
++                    if (bt > life[i]) continue;
++                    float e1 = (1 - (float) Math.exp(-k * bt)) / k;
++                    float tb = Math.max(0f, bt - 0.07f);
++                    float e0 = (1 - (float) Math.exp(-k * tb)) / k;
++                    float x1 = bx[b] + vx[i] * e1, y1 = by[b] + vy[i] * e1 + 0.5f * g * bt * bt;
++                    float x0 = bx[b] + vx[i] * e0, y0 = by[b] + vy[i] * e0 + 0.5f * g * tb * tb;
++                    float fade = (float) Math.pow(1 - bt / life[i], 1.4);
++                    if (bt > life[i] * 0.6f) fade *= 0.55f + 0.45f * (float) Math.sin(38 * bt + phase[i]);   // crackle
++                    spark.setColor(color[i]);
++                    spark.setAlpha(Math.max(0, Math.round(255 * fade)));
++                    c.drawLine(x0, y0, x1, y1, spark);
++                }
++            }
++            postInvalidateOnAnimation();
++        }
++    }
++}
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java b/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
+index fe821b9..5e5b04b 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/DockDecoration.java
+@@ -20,6 +20,21 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
+     private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+     private final RectF rect = new RectF();
+ 
++    /** bravia: told where the band is after each draw that moves it (in the grid's coordinates), or null when the
++     *  dock has scrolled away. The Diwali diyas stand on it. */
++    interface BandListener {
++        void onBand(RectF band, RecyclerView parent);
++    }
++
++    private BandListener bandListener;
++    private final RectF lastBand = new RectF();
++    private boolean hadBand;
++
++    void setBandListener(BandListener l) {
++        bandListener = l;
++        hadBand = false;
++    }
++
+     /** Extra band below the tiles for their names (always_show_names), in px. */
+     private final float namesRoom;
+     /** Light glass like the top bar's pills (config.xml dock_glass): a white tint that fades downwards. */
+@@ -109,7 +124,13 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
+                 rect.union(l, t, r, b);
+             }
+         }
+-        if (!any) return;
++        if (!any) {
++            if (bandListener != null && hadBand) {
++                hadBand = false;
++                bandListener.onBand(null, parent);
++            }
++            return;
++        }
+         float pad = 14 * density;
+         // The band can only draw inside the grid, and the first and last dock tiles sit 12dp in from its
+         // edges: a full 14dp at the sides sliced the rounded ends flat (#454). Keep the sides, with the
+@@ -148,5 +169,10 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
+         }
+         c.drawRoundRect(rect, radius, radius, band);
+         c.drawRoundRect(rect, radius, radius, edge);
++        if (bandListener != null && (!hadBand || !rect.equals(lastBand))) {
++            hadBand = true;
++            lastBand.set(rect);
++            bandListener.onBand(lastBand, parent);
++        }
+     }
+ }
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+index 148ff50..7972555 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
+@@ -1,5 +1,15 @@
+ package com.gathin.tvhome;
+ 
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.Map;
++import java.util.Set;
++
+ import android.content.res.Resources;
+ 
+ import java.time.LocalDate;
+@@ -27,12 +37,26 @@ final class Festival {
+     final String greeting;
+     /** Focus glow colour as 0xAARRGGBB, or 0 for {@link #DEFAULT_ACCENT}. */
+     final int accent;
++    /** bravia: festival_days, a greeting for a given day ("2026-11-06": "Happy Dhanteras"), over the greeting above. */
++    final Map<LocalDate, String> days;
++    /** bravia: festival_decor, the decorations to show (DiwaliDecor): toran, kandil, diyas, lights, fireworks. */
++    final Set<String> decor;
++    /** bravia: festival_fireworks, the nights with fireworks. */
++    final Set<LocalDate> fireworks;
+ 
+     private Festival(String name, LocalDate until, String greeting, int accent) {
++        this(name, until, greeting, accent, Collections.emptyMap(), Collections.emptySet(), Collections.emptySet());
++    }
++
++    private Festival(String name, LocalDate until, String greeting, int accent, Map<LocalDate, String> days,
++                     Set<String> decor, Set<LocalDate> fireworks) {
+         this.name = name;
+         this.until = until;
+         this.greeting = greeting;
+         this.accent = accent;
++        this.days = days;
++        this.decor = decor;
++        this.fireworks = fireworks;
+     }
+ 
+     /**
+@@ -54,6 +78,54 @@ final class Festival {
+         return new Festival(n, end, g, parseColor(accent));
+     }
+ 
++    /** The same, with the bravia extras: festival_days, festival_decor and festival_fireworks (each may be null). */
++    static Festival parse(String name, String until, String greeting, String accent, JSONObject days,
++                          JSONArray decor, JSONArray fireworks) {
++        Festival base = parse(name, until, greeting, accent);
++        if (base == NONE) return NONE;
++        Map<LocalDate, String> byDay = new HashMap<>();
++        if (days != null) {
++            for (Iterator<String> it = days.keys(); it.hasNext(); ) {
++                String key = it.next();
++                try {
++                    String text = Cards.cleanLabel(days.optString(key, ""), "");
++                    if (!text.isEmpty()) byDay.put(LocalDate.parse(key.trim()), text);
++                } catch (DateTimeParseException ignored) {
++                    // a day that isn't a date is left out
++                }
++            }
++        }
++        Set<String> names = new HashSet<>();
++        for (int i = 0; decor != null && i < decor.length(); i++) {
++            String s = decor.optString(i, "").trim().toLowerCase(Locale.ROOT);
++            if (!s.isEmpty()) names.add(s);
++        }
++        Set<LocalDate> nights = new HashSet<>();
++        for (int i = 0; fireworks != null && i < fireworks.length(); i++) {
++            try {
++                nights.add(LocalDate.parse(fireworks.optString(i, "").trim()));
++            } catch (DateTimeParseException ignored) {
++                // left out
++            }
++        }
++        return new Festival(base.name, base.until, base.greeting, base.accent, Collections.unmodifiableMap(byDay),
++                Collections.unmodifiableSet(names), Collections.unmodifiableSet(nights));
++    }
++
++    boolean decor(String name) {
++        return decor.contains(name);
++    }
++
++    boolean fireworksNight(LocalDate day) {
++        return fireworks.contains(day);
++    }
++
++    /** The day's own greeting (festival_days) when there is one, else {@link #greetingText(Resources)}. */
++    String greetingText(Resources res, LocalDate today) {
++        String day = days.get(today);
++        return day != null ? day : greetingText(res);
++    }
++
+     /** Whether the skin shows today. */
+     boolean active(LocalDate today) {
+         return !name.isEmpty() && (until == null || !today.isAfter(until));
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+index 5c649da..8572285 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
+@@ -23,6 +23,7 @@ import android.graphics.Canvas;
+ import android.graphics.Color;
+ import android.graphics.LinearGradient;
+ import android.graphics.Paint;
++import android.graphics.RectF;
+ import android.graphics.RadialGradient;
+ import android.graphics.Rect;
+ import android.graphics.Shader;
+@@ -573,7 +574,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             public void onChildViewDetachedFromWindow(@NonNull View v) {
+             }
+         });
+-        if (dockRow) grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
++        if (dockRow) grid.addItemDecoration(dockDecoration = new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
+                 singleRow, cfg.dockBandAll));
+         if (cfg.fadeRows) TopFade.attach(grid, 48 * density);
+         // Reduced motion: the tiles are simply there, with no entrance (reloadApps skips it there too).
+@@ -792,6 +793,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             }
+         }
+         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
++        if (festive && "diwali".equals(festival.name) && !festival.decor.isEmpty()) setUpDiwali();
+ 
+         // Hide the glass when focus leaves the tiles.
+         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
+@@ -919,6 +921,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     protected void onResume() {
+         super.onResume();
+         getContentResolver().registerContentObserver(Settings.Global.getUriFor(WEATHER_KEY), false, weatherObserver);
++        if (diwali != null) {
++            diwali.start();
++            root.post(this::placeDiwali);
++            handler.postDelayed(() -> {
++                if (diwali != null) diwali.maybeFireworks();
++            }, 900);
++        }
+         root.post(weatherCheck);
+         // A festival that started or ended while Home was in the background: rebuild with or without it.
+         if (festive != festival.active(LocalDate.now())) {
+@@ -1132,6 +1141,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     protected void onPause() {
+         super.onPause();
+         getContentResolver().unregisterContentObserver(weatherObserver);
++        if (diwali != null) diwali.stop();
+         root.removeCallbacks(weatherCheck);
+         root.removeCallbacks(showIdleClock);
+         endReorder();   // Home or another app while reordering keeps the order so far
+@@ -2478,6 +2488,63 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         return text.isEmpty() || text.length() > 32 ? null : text;
+     }
+ 
++    // ---- Diwali decorations (bravia) ----------------------------------------------------------------
++
++    /** bravia: the Diwali decorations, while a diwali festival with festival_decor is on. */
++    private DiwaliDecor diwali;
++    private DockDecoration dockDecoration;
++
++    private void setUpDiwali() {
++        View content = grid;
++        while (content.getParent() != root && content.getParent() instanceof View) content = (View) content.getParent();
++        diwali = new DiwaliDecor(this, root, festival, reducedMotion, findViewById(R.id.ambient), content);
++        if (dockDecoration != null) {
++            dockDecoration.setBandListener((band, parent) -> {
++                RectF at = null;
++                if (band != null) {
++                    int[] a = new int[2], b = new int[2];
++                    parent.getLocationInWindow(a);
++                    root.getLocationInWindow(b);
++                    at = new RectF(band);
++                    at.offset(a[0] - b[0], a[1] - b[1]);
++                }
++                RectF place = at;
++                root.post(() -> {
++                    if (diwali != null) diwali.onDockBand(place);
++                });
++            });
++            grid.invalidate();
++        }
++        // Measured after each layout: before the first one every position reads 0. Placing changes the lantern's
++        // margin only when it moves, so this settles after one extra pass.
++        root.getViewTreeObserver().addOnGlobalLayoutListener(this::placeDiwali);
++        root.post(this::placeDiwali);
++    }
++
++    /**
++     * The lantern hangs in the open space on the right, its cord passing through the gap between the Wi-Fi and
++     * Settings pills, clear of the clock, the date and the app name. Without the Wi-Fi pill, just left of the pills.
++     */
++    private void placeDiwali() {
++        if (diwali == null) return;
++        View settings = findViewById(R.id.btnSettings);
++        if (settings.getWidth() == 0) return;   // not laid out yet
++        int cx;
++        if (btnWifi.getVisibility() == View.VISIBLE && btnWifi.getWidth() > 0) {
++            cx = (xInRoot(btnWifi) + btnWifi.getWidth() + xInRoot(settings)) / 2;
++        } else {
++            cx = xInRoot(findViewById(R.id.topButtons)) - Math.round(30 * density);
++        }
++        diwali.placeKandil(cx);
++    }
++
++    private int xInRoot(View v) {
++        int[] a = new int[2], b = new int[2];
++        v.getLocationInWindow(a);
++        root.getLocationInWindow(b);
++        return a[0] - b[0];
++    }
++
+     private void updateClockVisibility() {
+         boolean valid = System.currentTimeMillis() >= TIME_VALID_AFTER_MS;
+         clockBlock.setVisibility(valid ? View.VISIBLE : View.INVISIBLE);
+@@ -2525,7 +2592,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+             else if (hour < 22) res = R.string.good_evening;
+             else res = R.string.good_night;
+         }
+-        String festiveGreeting = festive ? festival.greetingText(getResources()) : "";
++        String festiveGreeting = festive ? festival.greetingText(getResources(), LocalDate.now()) : "";
+         if (!festiveGreeting.isEmpty()) {
+             greeting.setText(festiveGreeting);
+             greeting.setTextColor(liftTowardsWhite(festival.accentColor(), 0.25f));
+@@ -2536,6 +2603,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         }
+         if (shamsi) shamsiDate.setText(Shamsi.today(getResources()));
+         if (lunar) lunarDate.setText(Lunar.today(getResources(), lunarOffset));
++        if (diwali != null) placeDiwali();   // bravia: the date line's length changes with the weather text
+     }
+ 
+     // ---- race-weekend panel (a theme's race_calendar) -----------------------------------------------

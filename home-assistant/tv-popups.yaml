@@ -1,0 +1,27 @@
+# Pop-ups on the TV from Home Assistant, through PiPup (an Android TV app that shows a notification over
+# whatever is playing): https://github.com/mhoogenbosch/PiPup (install its PiPup.apk from the releases page).
+#
+# Home Assistant has no built-in action that POSTs JSON to an address you choose, so these two REST commands
+# go in configuration.yaml (at the top level; if you already have a `rest_command:` key, add them under it).
+# Change 192.168.1.50 to your TV's address, check the config and restart Home Assistant.
+#
+# Every pop-up then travels as one `popup` object, so text, pictures and camera streams all use the same
+# command. The fields (title, message, duration, position 0-8, colours, media) are in PiPup's README.
+#
+#   action: rest_command.tv_popup
+#   data:
+#     popup: {id: test, duration: 10, title: "Hello", message: "From Home Assistant"}
+#
+# When the TV is off the call fails; put `continue_on_error: true` on it so the rest of the automation runs.
+
+rest_command:
+  tv_popup:
+    url: "http://192.168.1.50:7979/notify"
+    method: POST
+    content_type: "application/json"
+    payload: "{{ popup | to_json }}"
+    timeout: 8
+  tv_popup_cancel:
+    url: "http://192.168.1.50:7979/cancel?id={{ id }}"
+    method: POST
+    timeout: 8

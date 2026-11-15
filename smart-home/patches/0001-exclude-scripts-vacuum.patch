@@ -1,0 +1,285 @@
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
+index cd82122..e91c324 100644
+--- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
+@@ -24,11 +24,18 @@ final class Config {
+     final String token;
+     /** Entity ids for the glance header, in order; empty means auto-pick weather and fuel prices. */
+     final List<String> glance;
++    /** Entity id patterns to leave off the list, "*" matching anything (e.g. "light.*_segment_*"). */
++    final List<String> exclude;
+ 
+     Config(String url, String token, List<String> glance) {
++        this(url, token, glance, null);
++    }
++
++    Config(String url, String token, List<String> glance, List<String> exclude) {
+         this.url = url;
+         this.token = token;
+         this.glance = Collections.unmodifiableList(glance == null ? Collections.emptyList() : glance);
++        this.exclude = Collections.unmodifiableList(exclude == null ? Collections.emptyList() : exclude);
+     }
+ 
+     boolean complete() {
+@@ -41,7 +48,8 @@ final class Config {
+ 
+     static Config load(Context c) {
+         SharedPreferences p = prefs(c);
+-        return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")));
++        return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")),
++                readGlance(p.getString("exclude", "")));
+     }
+ 
+     static void saveUrl(Context c, String url) {
+@@ -56,6 +64,10 @@ final class Config {
+         prefs(c).edit().putString("glance", joinGlance(ids)).apply();
+     }
+ 
++    static void saveExclude(Context c, List<String> patterns) {
++        prefs(c).edit().putString("exclude", joinGlance(patterns)).apply();
++    }
++
+     /** Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...]}) if there is one, and deletes it. */
+     static boolean importPushed(Context c) {
+         File dir = c.getExternalFilesDir(null);
+@@ -66,6 +78,7 @@ final class Config {
+             if (o.has("url")) saveUrl(c, o.optString("url"));
+             if (o.has("token")) saveToken(c, o.optString("token"));
+             if (o.has("glance")) saveGlance(c, parseGlance(o.opt("glance")));
++            if (o.has("exclude")) saveExclude(c, parseGlance(o.opt("exclude")));
+             return true;
+         } catch (Exception e) {
+             return false;
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
+index 0af04cc..6c4711a 100644
+--- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
+@@ -50,6 +50,8 @@ final class Ha {
+         }
+ 
+         boolean available() {
++            // A scene or script that has never run reports "unknown"; it still runs.
++            if (kind == Kind.SCENE) return !"unavailable".equals(state);
+             return !"unavailable".equals(state) && !"unknown".equals(state);
+         }
+ 
+@@ -68,6 +70,7 @@ final class Ha {
+                 case SCENE:
+                     return "Run";
+                 case TOGGLE:
++                    if (domain().equals("vacuum")) return capital(state);   // Docked, Cleaning, Returning
+                     boolean on = "on".equals(state);
+                     return on && brightness >= 0 ? "On · " + brightness + " %" : on ? "On" : "Off";
+                 case CLIMATE:
+@@ -166,13 +169,18 @@ final class Ha {
+      * or weather entities can't push the switches out.
+      */
+     static List<Entity> parse(String json, List<String> glanceIds) throws JSONException {
++        return parse(json, glanceIds, Collections.emptyList());
++    }
++
++    /** The same, leaving out entities whose id matches one of {@code exclude} ("*" matches anything). */
++    static List<Entity> parse(String json, List<String> glanceIds, List<String> exclude) throws JSONException {
+         JSONArray all = new JSONArray(json);
+         List<Entity> out = new ArrayList<>();
+         for (int i = 0; i < all.length(); i++) {
+             JSONObject o = all.optJSONObject(i);
+             if (o == null) continue;
+             Entity e = entity(o);
+-            if (e != null) out.add(e);
++            if (e != null && !excluded(e.id, exclude)) out.add(e);
+         }
+         out.sort((a, b) -> a.kind != b.kind ? a.kind.compareTo(b.kind) : a.name.compareToIgnoreCase(b.name));
+         Glance header = glance(out, glanceIds);
+@@ -222,6 +230,35 @@ final class Ha {
+     }
+ 
+     /** Rows for the remote list: weather and prices live in the glance header only. */
++    static boolean excluded(String id, List<String> patterns) {
++        for (String p : patterns) if (globMatches(p, id)) return true;
++        return false;
++    }
++
++    /**
++     * Whether the whole of {@code s} matches {@code pattern}, where "*" stands for any run of characters and
++     * every other character is literal ("light.*_segment_*"). A plain character loop, no regular expressions.
++     */
++    static boolean globMatches(String pattern, String s) {
++        int p = 0, i = 0, star = -1, mark = 0;
++        while (i < s.length()) {
++            if (p < pattern.length() && pattern.charAt(p) == '*') {
++                star = p++;
++                mark = i;
++            } else if (p < pattern.length() && pattern.charAt(p) == s.charAt(i)) {
++                p++;
++                i++;
++            } else if (star >= 0) {
++                p = star + 1;   // let the last "*" swallow one more character and try again
++                i = ++mark;
++            } else {
++                return false;
++            }
++        }
++        while (p < pattern.length() && pattern.charAt(p) == '*') p++;
++        return p == pattern.length();
++    }
++
+     static boolean inList(Entity e) {
+         return e.kind != Kind.WEATHER && e.kind != Kind.PRICE;
+     }
+@@ -283,7 +320,10 @@ final class Ha {
+                 return new Entity(id, Kind.WEATHER, name, state, -1, a.optDouble("temperature", Double.NaN),
+                         Double.NaN, "°");
+             case "scene":
++            case "script":
+                 return new Entity(id, Kind.SCENE, name, state, -1, Double.NaN, Double.NaN, "");
++            case "vacuum":
++                return new Entity(id, Kind.TOGGLE, name, state, -1, Double.NaN, Double.NaN, "");
+             case "light":
+                 int b = a.has("brightness") && !a.isNull("brightness") ? (int) Math.round(a.optDouble("brightness", 0) * 100 / 255) : -1;
+                 return new Entity(id, Kind.TOGGLE, name, state, b, Double.NaN, Double.NaN, "");
+@@ -316,8 +356,13 @@ final class Ha {
+         if (!e.available()) return null;
+         switch (e.kind) {
+             case SCENE:
+-                return call("scene", "turn_on", e.id, null);
++                return call(e.domain(), "turn_on", e.id, null);   // a scene, or a script
+             case TOGGLE:
++                if (e.domain().equals("vacuum")) {
++                    // Out cleaning (or on its way): send it home. Docked, idle or paused: start a clean.
++                    boolean out = "cleaning".equals(e.state) || "returning".equals(e.state);
++                    return call("vacuum", out ? "return_to_base" : "start", e.id, null);
++                }
+                 return call("homeassistant", "toggle", e.id, null);
+             default:
+                 return null;
+diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
+index 8edae93..038f200 100644
+--- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
++++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
+@@ -100,7 +100,7 @@ public class MainActivity extends Activity {
+             String why = null;
+             if (r.ok()) {
+                 try {
+-                    found = Ha.parse(r.body, c.glance);
++                    found = Ha.parse(r.body, c.glance, c.exclude);
+                 } catch (JSONException e) {
+                     why = "Home Assistant's answer couldn't be read.";
+                 }
+diff --git a/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/ExcludeScriptsVacuumTest.java b/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/ExcludeScriptsVacuumTest.java
+new file mode 100644
+index 0000000..85b1602
+--- /dev/null
++++ b/addons/smart-home/app/src/test/java/io/github/maxhayim/smarthome/ExcludeScriptsVacuumTest.java
+@@ -0,0 +1,111 @@
++package io.github.maxhayim.smarthome;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import org.json.JSONObject;
++import org.junit.Test;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++
++/** Exclude patterns, scripts as one-press rows, and a robot vacuum as a toggle. */
++public class ExcludeScriptsVacuumTest {
++    static final String STATES = "["
++            + "{\"entity_id\":\"light.patio_light_segment_1\",\"state\":\"on\",\"attributes\":{\"friendly_name\":\"Segment 1\",\"brightness\":255}},"
++            + "{\"entity_id\":\"light.patio_light_segment_21\",\"state\":\"on\",\"attributes\":{\"brightness\":255}},"
++            + "{\"entity_id\":\"light.patio_string\",\"state\":\"on\",\"attributes\":{\"friendly_name\":\"Patio string\",\"brightness\":128}},"
++            + "{\"entity_id\":\"switch.sound_bar_music_mode\",\"state\":\"off\",\"attributes\":{}},"
++            + "{\"entity_id\":\"switch.sound_bar_night_sound\",\"state\":\"off\",\"attributes\":{\"friendly_name\":\"Night sound\"}},"
++            + "{\"entity_id\":\"script.movie_time\",\"state\":\"off\",\"attributes\":{\"friendly_name\":\"Movie time\"}},"
++            + "{\"entity_id\":\"vacuum.robovac\",\"state\":\"docked\",\"attributes\":{\"friendly_name\":\"RoboVac\"}},"
++            + "{\"entity_id\":\"vacuum.upstairs\",\"state\":\"cleaning\",\"attributes\":{}},"
++            + "{\"entity_id\":\"vacuum.gone\",\"state\":\"unavailable\",\"attributes\":{}}"
++            + "]";
++
++    private static Ha.Entity find(List<Ha.Entity> all, String id) {
++        for (Ha.Entity e : all) if (e.id.equals(id)) return e;
++        return null;
++    }
++
++    @Test
++    public void excludePatternsLeaveMatchingEntitiesOut() throws Exception {
++        List<Ha.Entity> all = Ha.parse(STATES, Collections.emptyList(),
++                Arrays.asList("light.*_segment_*", "switch.*_music_mode"));
++        assertNull(find(all, "light.patio_light_segment_1"));
++        assertNull(find(all, "light.patio_light_segment_21"));
++        assertNull(find(all, "switch.sound_bar_music_mode"));
++        assertNotNull(find(all, "light.patio_string"));
++        assertNotNull(find(all, "switch.sound_bar_night_sound"));
++        assertEquals(Ha.parse(STATES).size() - 3, all.size());
++    }
++
++    @Test
++    public void noPatternsKeepsEverything() throws Exception {
++        assertEquals(Ha.parse(STATES).size(), Ha.parse(STATES, Collections.emptyList(), Collections.emptyList()).size());
++    }
++
++    @Test
++    public void patternsAreLiteralApartFromTheStar() {
++        assertTrue(Ha.globMatches("light.*_segment_*", "light.patio_light_segment_3"));
++        assertTrue(Ha.globMatches("switch.fan*", "switch.fan_plug"));
++        assertTrue(Ha.globMatches("switch.fan*", "switch.fan"));
++        assertTrue(Ha.globMatches("*", "anything.at_all"));
++        assertTrue(Ha.globMatches("sensor.x", "sensor.x"));
++        assertTrue(Ha.globMatches("a*b*c", "a_b_b_c"));
++        assertFalse("whole id, not a prefix", Ha.globMatches("switch.fan", "switch.fan_plug"));
++        assertFalse("the dot is a dot", Ha.globMatches("light.a", "lightxa"));
++        assertFalse(Ha.globMatches("light.*_segment_*", "switch.patio_light_segment_3"));
++        assertFalse(Ha.globMatches("a*b*c", "a_b_b_"));
++        assertFalse(Ha.globMatches("", "x"));
++    }
++
++    @Test
++    public void excludeComesInThroughThePushedConfig() throws Exception {
++        assertEquals(Arrays.asList("light.*_segment_*", "switch.fan_*"),
++                Config.parseGlance(new JSONObject("{\"exclude\":[\"light.*_segment_*\",\" \",\"switch.fan_*\"]}").opt("exclude")));
++    }
++
++    @Test
++    public void scriptsRunLikeScenes() throws Exception {
++        Ha.Entity s = find(Ha.parse(STATES), "script.movie_time");
++        assertEquals(Ha.Kind.SCENE, s.kind);
++        assertEquals("Run", s.value());
++        Ha.Call c = Ha.press(s);
++        assertEquals("/api/services/script/turn_on", c.path);
++        assertEquals("{\"entity_id\":\"script.movie_time\"}", c.body);
++        assertEquals("scenes still go to scene", "/api/services/scene/turn_on",
++                Ha.press(find(Ha.parse(HaTest.STATES), "scene.good_night")).path);
++    }
++
++    @Test
++    public void aSceneThatNeverRanStillRuns() throws Exception {
++        List<Ha.Entity> all = Ha.parse("["
++                + "{\"entity_id\":\"scene.diwali\",\"state\":\"unknown\",\"attributes\":{\"friendly_name\":\"Diwali\"}},"
++                + "{\"entity_id\":\"scene.gone\",\"state\":\"unavailable\",\"attributes\":{}},"
++                + "{\"entity_id\":\"switch.new\",\"state\":\"unknown\",\"attributes\":{}}]");
++        Ha.Entity never = find(all, "scene.diwali");
++        assertEquals("Run", never.value());
++        assertEquals("/api/services/scene/turn_on", Ha.press(never).path);
++        assertNull(Ha.press(find(all, "scene.gone")));
++        assertNull("other kinds still treat unknown as unavailable", Ha.press(find(all, "switch.new")));
++    }
++
++    @Test
++    public void aVacuumStartsWhenDockedAndGoesHomeWhenOut() throws Exception {
++        List<Ha.Entity> all = Ha.parse(STATES);
++        Ha.Entity docked = find(all, "vacuum.robovac");
++        assertEquals(Ha.Kind.TOGGLE, docked.kind);
++        assertEquals("Docked", docked.value());
++        assertEquals("/api/services/vacuum/start", Ha.press(docked).path);
++        Ha.Entity out = find(all, "vacuum.upstairs");
++        assertEquals("Cleaning", out.value());
++        assertEquals("/api/services/vacuum/return_to_base", Ha.press(out).path);
++        assertNull("vacuums don't dim", Ha.step(docked, 1));
++        assertNull(Ha.press(find(all, "vacuum.gone")));
++    }
++}

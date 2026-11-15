@@ -1,0 +1,51 @@
+# "Someone's at the door" on the TV, over whatever is playing (it ends the screensaver too).
+# Needs the rest_command from tv-popups.yaml. Paste this into a new automation (Settings > Automations >
+# Create > three dots > Edit in YAML) and change the trigger to your doorbell.
+#
+# Doorbells show up in Home Assistant in different ways:
+#   - a binary_sensor that turns on when someone presses it (Reolink, Ring, UniFi Protect, ESPHome): the
+#     trigger below
+#   - an event entity (event.front_door_doorbell): use `trigger: state` on that entity with no `to:` and
+#     `not_from: [unavailable, unknown]`; its state changes to a new timestamp on every press
+#   - a doorbell that only lives in Apple Home: make a helper toggle (input_boolean.front_door_rang),
+#     share it to Apple Home with the HomeKit Bridge integration, and add an Apple Home automation
+#     "when the doorbell rings, turn on Front door rang". Then trigger on that toggle and switch it back
+#     off in the actions (the commented lines). That's how it runs at my place.
+#
+# The Smart Home add-on's "Front door" tile reads this automation's last run as the last ring. Home Assistant
+# names the entity after the alias, so it's automation.tv_doorbell_pop_up: that's what goes in the add-on's
+# config as "summary": {"doorbell": "automation.tv_doorbell_pop_up"}.
+
+id: tv_doorbell_popup
+alias: "TV: doorbell pop-up"
+mode: single
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.front_door_doorbell
+    to: "on"
+actions:
+  # - action: input_boolean.turn_off
+  #   target:
+  #     entity_id: input_boolean.front_door_rang
+  - action: rest_command.tv_popup
+    continue_on_error: true
+    data:
+      popup:
+        id: front-door
+        duration: 20
+        position: 0
+        animation: fade
+        title: "🔔  Front door"
+        titleSize: 26
+        message: "Someone's at the door"
+        messageSize: 18
+        messageColor: "#D9FFFFFF"
+        backgroundColor: "#EB1C1C1E"
+        cornerRadius: 28
+        borderWidth: 0
+        showProgress: true
+        # A camera snapshot works too (use your Home Assistant address):
+        # media:
+        #   image:
+        #     uri: "http://192.168.1.10:8123{{ state_attr('camera.front_door', 'entity_picture') }}"
+        #     width: 480
