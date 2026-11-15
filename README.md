@@ -4,7 +4,7 @@ A Christmas season for Android TV and Google TV. The home screen counts down to 
 
 ![Christmas Eve on the home screen: the star on the tree lights up and Santa's sleigh crosses the moon](docs/media/christmas-eve.gif)
 
-It runs on [CleanYourTV](https://github.com/Gathin23/cleanyourtv)'s TV Home, an open-source launcher that makes an Android TV look a lot like an Apple TV: your apps in a dock, no ads, no sponsored rows. I made the Christmas season, the screensaver and a few Home Assistant pieces for the TV in our living room (a Sony Bravia on Google TV), and figured other people might like them too.
+It runs on [CleanYourTV](https://github.com/Gathin23/cleanyourtv)'s TV Home, an open-source launcher that makes an Android TV look a lot like an Apple TV: your apps in a dock, no ads, no sponsored rows. I made the Christmas season, the screensaver and a few [Home Assistant pieces](#home-assistant) for the TV in our living room (a Sony Bravia on Google TV), and figured other people might like them too.
 
 [Install](#install) · [What happens when](#what-happens-when) · [The screensaver](#the-screensaver) · [Home Assistant](docs/home-assistant.md) · [Which TVs](#which-tvs-it-works-on) · [Make it yours](#make-it-yours)
 
@@ -60,17 +60,20 @@ The videos are free clips from [Mixkit](https://mixkit.co). They aren't stored i
 
 ## Home Assistant
 
-Three optional extras, all in [docs/home-assistant.md](docs/home-assistant.md):
+If you run Home Assistant, the TV can join in. There are three optional extras; each works without the others, and all three stay after the Christmas season packs itself away. Setup for each is in [docs/home-assistant.md](docs/home-assistant.md).
 
-- the weather from Home Assistant on the date line, on Home and on the screensaver
-- a Smart Home dashboard: lights, plugs, scenes, the thermostat and sensors as tiles you work with the remote, with who's home and when the doorbell last rang
-- "Someone's at the door" pop-ups over whatever is playing
+- A Smart Home dashboard you drive with the remote. Scenes, lights, plugs, the thermostat, sensors, doors and locks are tiles, with the weather and who's home along the top and a Front door tile that says when the doorbell last rang. OK switches a light or runs a scene. Hold OK on a light and Left and Right dim it (on the thermostat they set the temperature). Locks are shown but never unlocked from the remote.
+- "Someone's at the door" pop-ups over whatever is playing. If the screensaver is on, it closes and the pop-up shows over Home.
+- The weather from Home Assistant on the date line, on Home and on the screensaver. TV Home has no internet permission, so a small script on your network pushes it in.
 
 | | |
 |---|---|
-| ![The Smart Home dashboard with scenes, lights and plugs](docs/media/smart-home.jpg) | ![A doorbell pop-up over the Christmas home screen](docs/media/doorbell-popup.jpg) |
+| ![The Smart Home dashboard: scenes, lights and plugs as tiles, with the weather and who's home in the header](docs/media/smart-home.jpg) | ![A doorbell pop-up over the Christmas home screen](docs/media/doorbell-popup.jpg) |
+| The dashboard, driven with the remote | Someone's at the door |
 
-(The dashboard here is talking to a stand-in Home Assistant with a made-up house.)
+![More of the dashboard: the thermostat, sensors, doors, the lock and the doorbell's last ring](docs/media/smart-home-sensors.jpg)
+
+(These come from a stand-in Home Assistant with a made-up house.)
 
 ## Install
 
@@ -155,7 +158,9 @@ If you want the full treatment (removing the TV's ads and bloat, keeping the rem
 
 ### Already running CleanYourTV?
 
-Your copy of TV Home is signed with your own key, so the release APK won't install over it. Either build this repo with `./build.sh`, which signs with the same `~/.android` key your CleanYourTV build used, or uninstall yours first. Loading the Christmas theme replaces whatever theme you had, so push yours again after New Year's.
+This is built on CleanYourTV 3.0, and your copy of TV Home is signed with your own key, so the release APK won't install over it. If you're still on 3.0, build this repo with `./build.sh`, which signs with the same `~/.android` key your CleanYourTV build used. On 3.1 or newer that won't work, because Android won't put an older version over a newer one, even one you built yourself. Uninstall yours first (`adb uninstall com.gathin.tvhome`) and install this one straight after, since the TV may have no Home screen in between. The Smart Home add-on here is from 3.4; if yours is newer, uninstall it first too. Uninstalling clears TV Home's settings, and loading the Christmas theme replaces whatever theme you had, so push yours again after New Year's.
+
+CleanYourTV 3.4 added a `christmas` theme of its own: a still wallpaper of a snowy night with Santa's sleigh. This is a separate thing, a season that changes every day. That takes launcher code, which is why it comes as its own build of TV Home.
 
 ## Which TVs it works on
 
