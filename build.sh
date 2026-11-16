@@ -98,10 +98,10 @@ case "$what" in
   *) die "usage: ./build.sh [launcher|smart-home]" ;;
 esac
 if [ "$what" = all ] || [ "$what" = launcher ]; then
-  build "TV Home with the Christmas season" v3.0.0 67dc5bee169038ed065a48ef837cf7fed5cf40f4 \
-    launcher "$HERE/launcher/patches" "assembleRelease" christmas-tv-home.apk
+  build "TV Home with the Christmas season" v3.5.0 d11bd68c9ac45b2fb38480941586d17930137e9d \
+    launcher "$HERE/launcher/patches" "testReleaseUnitTest assembleRelease" christmas-tv-home.apk
 fi
 if [ "$what" = all ] || [ "$what" = smart-home ]; then
-  build "Smart Home add-on" v3.4.0 fc148d5a9707b30e8f49f489625947421740dc55 \
+  build "Smart Home add-on" v3.5.0 d11bd68c9ac45b2fb38480941586d17930137e9d \
     addons/smart-home "$HERE/smart-home/patches" "testReleaseUnitTest assembleRelease" smart-home-addon.apk
 fi

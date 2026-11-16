@@ -1,69 +1,67 @@
 diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
-index cd82122..e91c324 100644
+index f892aab..c6c5020 100644
 --- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
 +++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
-@@ -24,11 +24,18 @@ final class Config {
-     final String token;
-     /** Entity ids for the glance header, in order; empty means auto-pick weather and fuel prices. */
-     final List<String> glance;
-+    /** Entity id patterns to leave off the list, "*" matching anything (e.g. "light.*_segment_*"). */
+@@ -30,18 +30,26 @@ final class Config {
+     final List<String> hide;
+     /** Leave out rows Home Assistant reports as unavailable (and unknown, except scenes). */
+     final boolean hideUnavailable;
++    /** Entity id patterns to leave out everywhere, the glance header included; "*" matches anything. */
 +    final List<String> exclude;
  
      Config(String url, String token, List<String> glance) {
-+        this(url, token, glance, null);
+-        this(url, token, glance, null, null, false);
++        this(url, token, glance, null, null, false, null);
+     }
+ 
+     Config(String url, String token, List<String> glance, List<String> show, List<String> hide, boolean hideUnavailable) {
++        this(url, token, glance, show, hide, hideUnavailable, null);
 +    }
 +
-+    Config(String url, String token, List<String> glance, List<String> exclude) {
++    Config(String url, String token, List<String> glance, List<String> show, List<String> hide, boolean hideUnavailable,
++           List<String> exclude) {
          this.url = url;
          this.token = token;
          this.glance = Collections.unmodifiableList(glance == null ? Collections.emptyList() : glance);
+         this.show = Collections.unmodifiableList(show == null ? Collections.emptyList() : show);
+         this.hide = Collections.unmodifiableList(hide == null ? Collections.emptyList() : hide);
+         this.hideUnavailable = hideUnavailable;
 +        this.exclude = Collections.unmodifiableList(exclude == null ? Collections.emptyList() : exclude);
      }
  
      boolean complete() {
-@@ -41,7 +48,8 @@ final class Config {
- 
-     static Config load(Context c) {
+@@ -56,7 +64,7 @@ final class Config {
          SharedPreferences p = prefs(c);
--        return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")));
-+        return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")),
-+                readGlance(p.getString("exclude", "")));
+         return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")),
+                 readGlance(p.getString("show", "")), readGlance(p.getString("hide", "")),
+-                p.getBoolean("hide_unavailable", false));
++                p.getBoolean("hide_unavailable", false), readGlance(p.getString("exclude", "")));
      }
  
-     static void saveUrl(Context c, String url) {
-@@ -56,6 +64,10 @@ final class Config {
-         prefs(c).edit().putString("glance", joinGlance(ids)).apply();
-     }
+     private static void saveList(Context c, String key, List<String> ids) {
+@@ -77,7 +85,8 @@ final class Config {
  
-+    static void saveExclude(Context c, List<String> patterns) {
-+        prefs(c).edit().putString("exclude", joinGlance(patterns)).apply();
-+    }
-+
-     /** Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...]}) if there is one, and deletes it. */
+     /**
+      * Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...], "show": [...], "hide": [...],
+-     * "hide_unavailable": true}) if there is one, and deletes it. Only the keys present change.
++     * "hide_unavailable": true,
++     * "exclude": [...]}) if there is one, and deletes it. Only the keys present change.
+      */
      static boolean importPushed(Context c) {
          File dir = c.getExternalFilesDir(null);
-@@ -66,6 +78,7 @@ final class Config {
-             if (o.has("url")) saveUrl(c, o.optString("url"));
-             if (o.has("token")) saveToken(c, o.optString("token"));
-             if (o.has("glance")) saveGlance(c, parseGlance(o.opt("glance")));
-+            if (o.has("exclude")) saveExclude(c, parseGlance(o.opt("exclude")));
+@@ -93,6 +102,7 @@ final class Config {
+             if (o.has("hide_unavailable")) {
+                 prefs(c).edit().putBoolean("hide_unavailable", o.optBoolean("hide_unavailable", false)).apply();
+             }
++            if (o.has("exclude")) saveList(c, "exclude", parseGlance(o.opt("exclude")));
              return true;
          } catch (Exception e) {
              return false;
 diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
-index 0af04cc..6c4711a 100644
+index e747eb9..c7dd7ea 100644
 --- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
 +++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Ha.java
-@@ -50,6 +50,8 @@ final class Ha {
-         }
- 
-         boolean available() {
-+            // A scene or script that has never run reports "unknown"; it still runs.
-+            if (kind == Kind.SCENE) return !"unavailable".equals(state);
-             return !"unavailable".equals(state) && !"unknown".equals(state);
-         }
- 
-@@ -68,6 +70,7 @@ final class Ha {
+@@ -66,6 +66,7 @@ final class Ha {
                  case SCENE:
                      return "Run";
                  case TOGGLE:
@@ -71,15 +69,33 @@ index 0af04cc..6c4711a 100644
                      boolean on = "on".equals(state);
                      return on && brightness >= 0 ? "On · " + brightness + " %" : on ? "On" : "Off";
                  case CLIMATE:
-@@ -166,13 +169,18 @@ final class Ha {
+@@ -160,7 +161,7 @@ final class Ha {
       * or weather entities can't push the switches out.
       */
      static List<Entity> parse(String json, List<String> glanceIds) throws JSONException {
-+        return parse(json, glanceIds, Collections.emptyList());
+-        return parse(json, glanceIds, null, null, false);
++        return parse(json, glanceIds, null, null, false, null);
+     }
+ 
+     /**
+@@ -171,13 +172,27 @@ final class Ha {
+      */
+     static List<Entity> parse(String json, List<String> glanceIds, List<String> show, List<String> hide,
+                               boolean hideUnavailable) throws JSONException {
++        return parse(json, glanceIds, show, hide, hideUnavailable, null);
 +    }
 +
 +    /** The same, leaving out entities whose id matches one of {@code exclude} ("*" matches anything). */
 +    static List<Entity> parse(String json, List<String> glanceIds, List<String> exclude) throws JSONException {
++        return parse(json, glanceIds, null, null, false, exclude);
++    }
++
++    /**
++     * The same, also leaving out every entity whose id matches one of {@code exclude} ("*" matches anything),
++     * the glance header included.
++     */
++    static List<Entity> parse(String json, List<String> glanceIds, List<String> show, List<String> hide,
++                              boolean hideUnavailable, List<String> exclude) throws JSONException {
          JSONArray all = new JSONArray(json);
          List<Entity> out = new ArrayList<>();
          for (int i = 0; i < all.length(); i++) {
@@ -91,11 +107,13 @@ index 0af04cc..6c4711a 100644
          }
          out.sort((a, b) -> a.kind != b.kind ? a.kind.compareTo(b.kind) : a.name.compareToIgnoreCase(b.name));
          Glance header = glance(out, glanceIds);
-@@ -222,6 +230,35 @@ final class Ha {
+@@ -244,6 +259,37 @@ final class Ha {
+         return new Glance(weather, prices);
      }
  
-     /** Rows for the remote list: weather and prices live in the glance header only. */
++    /** Whether id matches one of the exclude patterns ("*" matches anything). */
 +    static boolean excluded(String id, List<String> patterns) {
++        if (patterns == null) return false;
 +        for (String p : patterns) if (globMatches(p, id)) return true;
 +        return false;
 +    }
@@ -124,10 +142,10 @@ index 0af04cc..6c4711a 100644
 +        return p == pattern.length();
 +    }
 +
+     /** Rows for the remote list: weather and prices live in the glance header only. */
      static boolean inList(Entity e) {
          return e.kind != Kind.WEATHER && e.kind != Kind.PRICE;
-     }
-@@ -283,7 +320,10 @@ final class Ha {
+@@ -306,7 +352,10 @@ final class Ha {
                  return new Entity(id, Kind.WEATHER, name, state, -1, a.optDouble("temperature", Double.NaN),
                          Double.NaN, "°");
              case "scene":
@@ -138,7 +156,7 @@ index 0af04cc..6c4711a 100644
              case "light":
                  int b = a.has("brightness") && !a.isNull("brightness") ? (int) Math.round(a.optDouble("brightness", 0) * 100 / 255) : -1;
                  return new Entity(id, Kind.TOGGLE, name, state, b, Double.NaN, Double.NaN, "");
-@@ -316,8 +356,13 @@ final class Ha {
+@@ -339,8 +388,13 @@ final class Ha {
          if (!e.available()) return null;
          switch (e.kind) {
              case SCENE:
@@ -154,15 +172,15 @@ index 0af04cc..6c4711a 100644
              default:
                  return null;
 diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
-index 8edae93..038f200 100644
+index e025fde..006abf8 100644
 --- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
 +++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
-@@ -100,7 +100,7 @@ public class MainActivity extends Activity {
+@@ -131,7 +131,7 @@ public class MainActivity extends Activity {
              String why = null;
              if (r.ok()) {
                  try {
--                    found = Ha.parse(r.body, c.glance);
-+                    found = Ha.parse(r.body, c.glance, c.exclude);
+-                    found = Ha.parse(r.body, c.glance, c.show, c.hide, c.hideUnavailable);
++                    found = Ha.parse(r.body, c.glance, c.show, c.hide, c.hideUnavailable, c.exclude);
                  } catch (JSONException e) {
                      why = "Home Assistant's answer couldn't be read.";
                  }

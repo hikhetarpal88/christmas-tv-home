@@ -1,18 +1,18 @@
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Config.java b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
-index be67171..c2330d3 100644
+index 0d336c9..6a763c8 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/Config.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
-@@ -620,7 +620,9 @@ final class Config {
-         }
-         // A festive skin comes only from a theme; config.xml has no festival.
-         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
+@@ -715,7 +715,9 @@ final class Config {
+         // A festive skin comes only from a theme; config.xml has no festival. seasonal_skin names one the same way
+         // but launchers before it ignore the key, so a theme can carry it without older ones showing the diya skin.
+         Festival festival = json == null ? Festival.NONE : Festival.parse(festivalName(json),
 -                string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""));
 +                string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""),
 +                json.optJSONObject("festival_days"), json.optJSONArray("festival_decor"),
 +                json.optJSONArray("festival_fireworks"));
  
-         return new Config(dock, fillDock, hidden, libraryApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
-                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputUriScheme, Math.max(1, columns),
+         return new Config(dock, fillDock, hidden, libraryApps, libraryExcludedApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
+                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputSources, inputUriScheme, Math.max(1, columns),
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/DiwaliDecor.java b/launcher/app/src/main/java/com/gathin/tvhome/DiwaliDecor.java
 new file mode 100644
 index 0000000..ad375bf
@@ -794,7 +794,7 @@ index fe821b9..5e5b04b 100644
      }
  }
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
-index 148ff50..7972555 100644
+index 1be6404..2dcc6c0 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
 @@ -1,5 +1,15 @@
@@ -813,7 +813,7 @@ index 148ff50..7972555 100644
  import android.content.res.Resources;
  
  import java.time.LocalDate;
-@@ -27,12 +37,26 @@ final class Festival {
+@@ -34,12 +44,26 @@ final class Festival {
      final String greeting;
      /** Focus glow colour as 0xAARRGGBB, or 0 for {@link #DEFAULT_ACCENT}. */
      final int accent;
@@ -840,7 +840,7 @@ index 148ff50..7972555 100644
      }
  
      /**
-@@ -54,6 +78,54 @@ final class Festival {
+@@ -61,6 +85,54 @@ final class Festival {
          return new Festival(n, end, g, parseColor(accent));
      }
  
@@ -896,7 +896,7 @@ index 148ff50..7972555 100644
      boolean active(LocalDate today) {
          return !name.isEmpty() && (until == null || !today.isAfter(until));
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
-index 5c649da..8572285 100644
+index 8d5f077..96718a6 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
 @@ -23,6 +23,7 @@ import android.graphics.Canvas;
@@ -907,7 +907,7 @@ index 5c649da..8572285 100644
  import android.graphics.RadialGradient;
  import android.graphics.Rect;
  import android.graphics.Shader;
-@@ -573,7 +574,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -690,7 +691,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              public void onChildViewDetachedFromWindow(@NonNull View v) {
              }
          });
@@ -916,17 +916,17 @@ index 5c649da..8572285 100644
                  singleRow, cfg.dockBandAll));
          if (cfg.fadeRows) TopFade.attach(grid, 48 * density);
          // Reduced motion: the tiles are simply there, with no entrance (reloadApps skips it there too).
-@@ -792,6 +793,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -933,6 +934,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              }
          }
          if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
 +        if (festive && "diwali".equals(festival.name) && !festival.decor.isEmpty()) setUpDiwali();
  
          // Hide the glass when focus leaves the tiles.
-         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
-@@ -919,6 +921,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
-     protected void onResume() {
+         // Taken off in onDestroy: recreate() keeps the window, and a listener left on it held every earlier Home.
+@@ -1094,6 +1096,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          super.onResume();
+         resumed = true;
          getContentResolver().registerContentObserver(Settings.Global.getUriFor(WEATHER_KEY), false, weatherObserver);
 +        if (diwali != null) {
 +            diwali.start();
@@ -938,15 +938,15 @@ index 5c649da..8572285 100644
          root.post(weatherCheck);
          // A festival that started or ended while Home was in the background: rebuild with or without it.
          if (festive != festival.active(LocalDate.now())) {
-@@ -1132,6 +1141,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
-     protected void onPause() {
-         super.onPause();
+@@ -1316,6 +1325,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         RemoteKeys.release(this);
+         cancelHoldOk();
          getContentResolver().unregisterContentObserver(weatherObserver);
 +        if (diwali != null) diwali.stop();
          root.removeCallbacks(weatherCheck);
          root.removeCallbacks(showIdleClock);
          endReorder();   // Home or another app while reordering keeps the order so far
-@@ -2478,6 +2488,63 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2781,6 +2791,63 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          return text.isEmpty() || text.length() > 32 ? null : text;
      }
  
@@ -1010,7 +1010,7 @@ index 5c649da..8572285 100644
      private void updateClockVisibility() {
          boolean valid = System.currentTimeMillis() >= TIME_VALID_AFTER_MS;
          clockBlock.setVisibility(valid ? View.VISIBLE : View.INVISIBLE);
-@@ -2525,7 +2592,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2828,7 +2895,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              else if (hour < 22) res = R.string.good_evening;
              else res = R.string.good_night;
          }
@@ -1019,7 +1019,7 @@ index 5c649da..8572285 100644
          if (!festiveGreeting.isEmpty()) {
              greeting.setText(festiveGreeting);
              greeting.setTextColor(liftTowardsWhite(festival.accentColor(), 0.25f));
-@@ -2536,6 +2603,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2839,6 +2906,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          }
          if (shamsi) shamsiDate.setText(Shamsi.today(getResources()));
          if (lunar) lunarDate.setText(Lunar.today(getResources(), lunarOffset));

@@ -1,26 +1,37 @@
 diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
-index e91c324..65ad2d3 100644
+index c6c5020..ff3b356 100644
 --- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
 +++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/Config.java
-@@ -26,16 +26,32 @@ final class Config {
-     final List<String> glance;
-     /** Entity id patterns to leave off the list, "*" matching anything (e.g. "light.*_segment_*"). */
+@@ -32,17 +32,23 @@ final class Config {
+     final boolean hideUnavailable;
+     /** Entity id patterns to leave out everywhere, the glance header included; "*" matches anything. */
      final List<String> exclude;
 +    /** The pushed config's "summary" object, as JSON text: doorbell, temperature, extras (see Summary). */
 +    final String summary;
  
      Config(String url, String token, List<String> glance) {
-         this(url, token, glance, null);
+-        this(url, token, glance, null, null, false, null);
++        this(url, token, glance, null, null, false, null, "");
      }
  
-     Config(String url, String token, List<String> glance, List<String> exclude) {
-+        this(url, token, glance, exclude, "");
+     Config(String url, String token, List<String> glance, List<String> show, List<String> hide, boolean hideUnavailable) {
+-        this(url, token, glance, show, hide, hideUnavailable, null);
++        this(url, token, glance, show, hide, hideUnavailable, null, "");
 +    }
 +
 +    Config(String url, String token, List<String> glance, List<String> exclude, String summary) {
++        this(url, token, glance, null, null, false, exclude, summary);
+     }
+ 
+     Config(String url, String token, List<String> glance, List<String> show, List<String> hide, boolean hideUnavailable,
+-           List<String> exclude) {
++           List<String> exclude, String summary) {
          this.url = url;
          this.token = token;
          this.glance = Collections.unmodifiableList(glance == null ? Collections.emptyList() : glance);
+@@ -50,6 +56,16 @@ final class Config {
+         this.hide = Collections.unmodifiableList(hide == null ? Collections.emptyList() : hide);
+         this.hideUnavailable = hideUnavailable;
          this.exclude = Collections.unmodifiableList(exclude == null ? Collections.emptyList() : exclude);
 +        this.summary = summary == null ? "" : summary;
 +    }
@@ -35,30 +46,37 @@ index e91c324..65ad2d3 100644
      }
  
      boolean complete() {
-@@ -49,7 +65,7 @@ final class Config {
-     static Config load(Context c) {
+@@ -64,7 +80,8 @@ final class Config {
          SharedPreferences p = prefs(c);
          return new Config(p.getString("url", ""), p.getString("token", ""), readGlance(p.getString("glance", "")),
--                readGlance(p.getString("exclude", "")));
-+                readGlance(p.getString("exclude", "")), p.getString("summary", ""));
+                 readGlance(p.getString("show", "")), readGlance(p.getString("hide", "")),
+-                p.getBoolean("hide_unavailable", false), readGlance(p.getString("exclude", "")));
++                p.getBoolean("hide_unavailable", false), readGlance(p.getString("exclude", "")),
++                p.getString("summary", ""));
      }
  
-     static void saveUrl(Context c, String url) {
-@@ -68,6 +84,10 @@ final class Config {
-         prefs(c).edit().putString("exclude", joinGlance(patterns)).apply();
+     private static void saveList(Context c, String key, List<String> ids) {
+@@ -83,10 +100,14 @@ final class Config {
+         prefs(c).edit().putString("glance", joinGlance(ids)).apply();
      }
  
 +    static void saveSummary(Context c, String json) {
 +        prefs(c).edit().putString("summary", json == null ? "" : json).apply();
 +    }
 +
-     /** Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...]}) if there is one, and deletes it. */
+     /**
+      * Takes a pushed config.json ({"url": ..., "token": ..., "glance": [...], "show": [...], "hide": [...],
+-     * "hide_unavailable": true,
+-     * "exclude": [...]}) if there is one, and deletes it. Only the keys present change.
++     * "hide_unavailable": true, "exclude": [...], "summary": {...}}) if there is one, and deletes it. Only the
++     * keys present change.
+      */
      static boolean importPushed(Context c) {
          File dir = c.getExternalFilesDir(null);
-@@ -79,6 +99,10 @@ final class Config {
-             if (o.has("token")) saveToken(c, o.optString("token"));
-             if (o.has("glance")) saveGlance(c, parseGlance(o.opt("glance")));
-             if (o.has("exclude")) saveExclude(c, parseGlance(o.opt("exclude")));
+@@ -103,6 +124,10 @@ final class Config {
+                 prefs(c).edit().putBoolean("hide_unavailable", o.optBoolean("hide_unavailable", false)).apply();
+             }
+             if (o.has("exclude")) saveList(c, "exclude", parseGlance(o.opt("exclude")));
 +            if (o.has("summary")) {
 +                JSONObject summary = o.optJSONObject("summary");
 +                saveSummary(c, summary == null ? "" : summary.toString());
@@ -67,10 +85,10 @@ index e91c324..65ad2d3 100644
          } catch (Exception e) {
              return false;
 diff --git a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
-index 038f200..32706d2 100644
+index 006abf8..63fda96 100644
 --- a/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
 +++ b/addons/smart-home/app/src/main/java/io/github/maxhayim/smarthome/MainActivity.java
-@@ -2,42 +2,68 @@ package io.github.maxhayim.smarthome;
+@@ -2,47 +2,73 @@ package io.github.maxhayim.smarthome;
  
  import android.app.Activity;
  import android.app.AlertDialog;
@@ -104,6 +122,7 @@ index 038f200..32706d2 100644
 +import java.util.Map;
  import java.util.concurrent.ExecutorService;
  import java.util.concurrent.Executors;
+ import java.util.concurrent.RejectedExecutionException;
  
  /**
 - * The tile and module card open this: a glance of weather and fuel prices at the top, then your Home
@@ -135,6 +154,10 @@ index 038f200..32706d2 100644
 +    private List<Summary.Person> people = new ArrayList<>();
 +    private String doorRang;
      private String problem;
+     private final ReadGate reads = new ReadGate();
+     private final Targets targets = new Targets();
+     /** One state read 600 ms after the latest command's reply, however many commands went out. */
+     private final Runnable afterCommand = this::load;
 +    private String layoutKey = "";
 +    private Typeface medium;
 +    /** The light or thermostat Left and Right are adjusting, after a long press on OK; null otherwise. */
@@ -144,7 +167,7 @@ index 038f200..32706d2 100644
      private final Runnable refresh = new Runnable() {
          @Override
          public void run() {
-@@ -49,26 +75,60 @@ public class MainActivity extends Activity {
+@@ -54,26 +80,60 @@ public class MainActivity extends Activity {
      @Override
      protected void onCreate(Bundle savedInstanceState) {
          super.onCreate(savedInstanceState);
@@ -224,10 +247,10 @@ index 038f200..32706d2 100644
      }
  
      @Override
-@@ -76,13 +136,15 @@ public class MainActivity extends Activity {
-         super.onResume();
-         Config.importPushed(this);
+@@ -83,12 +143,14 @@ public class MainActivity extends Activity {
+         Config was = config;
          config = Config.load(this);
+         if (was != null && (!was.url.equals(config.url) || !was.token.equals(config.token))) forget();
 -        build();
 +        layoutKey = "";
 +        render();
@@ -236,13 +259,12 @@ index 038f200..32706d2 100644
  
      @Override
      protected void onPause() {
-         main.removeCallbacks(refresh);
 +        endAdjust();
-         super.onPause();
-     }
- 
-@@ -97,10 +159,16 @@ public class MainActivity extends Activity {
-         net.execute(() -> {
+         // Every pending refresh and reply, and reads already queued: nothing runs once the screen is gone.
+         main.removeCallbacksAndMessages(null);
+         reads.reset();
+@@ -128,10 +190,16 @@ public class MainActivity extends Activity {
+             if (!reads.current(gen)) return;
              HaClient.Reply r = new HaClient(c.url, c.token).get("/api/states");
              List<Ha.Entity> found = null;
 +            List<Summary.Person> who = null;
@@ -250,7 +272,7 @@ index 038f200..32706d2 100644
              String why = null;
              if (r.ok()) {
                  try {
-                     found = Ha.parse(r.body, c.glance, c.exclude);
+                     found = Ha.parse(r.body, c.glance, c.show, c.hide, c.hideUnavailable, c.exclude);
 +                    JSONArray states = new JSONArray(r.body);
 +                    who = Summary.people(states);
 +                    door = Summary.doorRang(states, c, System.currentTimeMillis(), ZoneId.systemDefault(),
@@ -258,7 +280,7 @@ index 038f200..32706d2 100644
                  } catch (JSONException e) {
                      why = "Home Assistant's answer couldn't be read.";
                  }
-@@ -108,12 +176,16 @@ public class MainActivity extends Activity {
+@@ -139,15 +207,19 @@ public class MainActivity extends Activity {
                  why = Ha.problem(r.code);
              }
              List<Ha.Entity> f = found;
@@ -267,24 +289,29 @@ index 038f200..32706d2 100644
 +            String d = door;
 +            String y = why;
              main.post(() -> {
-                 if (isFinishing()) return;
+                 if (isFinishing() || !reads.finish(gen)) return;
 -                problem = w;
 +                problem = y;
-                 if (f != null) entities = f;
+                 if (f != null) {
+                     entities = f;
+                     targets.read(since);
++                    doorRang = d;
+                 }
 -                build();
 +                if (w != null) people = w;
-+                if (f != null) doorRang = d;
 +                render();
+                 if (reads.takeAgain()) load();
              });
          });
-     }
-@@ -130,92 +202,364 @@ public class MainActivity extends Activity {
-         });
+@@ -180,99 +252,364 @@ public class MainActivity extends Activity {
+         }
      }
  
--    /** Rebuilds the list; focus stays on the row it was on. */
+-    /** Rebuilds the list; focus stays on the same entity's row, wherever the refresh put it. */
 -    private void build() {
--        int focused = rows.indexOfChild(rows.getFocusedChild());
+-        View had = rows.getFocusedChild();
+-        Object focusedKey = had == null ? null : had.getTag();
+-        int focused = rows.indexOfChild(had);
 -        rows.removeAllViews();
 +    // ---- drawing ------------------------------------------------------------------------------------
 +
@@ -414,7 +441,8 @@ index 038f200..32706d2 100644
 -            boolean steps = Ha.step(e, 1) != null;
 -            boolean bar = e.kind == Ha.Kind.TOGGLE && e.brightness >= 0;
 -            Row r = add(new Row(this, e.name, null, bar, press == null ? null : () -> send(Ha.press(e)),
--                    steps ? d -> send(Ha.step(e, d)) : null));
+-                    steps ? d -> step(e, d) : null));
+-            r.setTag(e.id);
 -            r.setValue(e.value());
 -            if (bar) r.setBar("on".equals(e.state) ? e.brightness / 100f : 0f);
 -            if (!e.available()) r.setAlpha(0.5f);
@@ -426,16 +454,20 @@ index 038f200..32706d2 100644
          heading("Connection");
 -        Row url = add(new Row(this, "Home Assistant address", "For example http://192.168.1.10:8123", false,
 -                this::editUrl, null));
+-        url.setTag("connection:url");
 +        Row url = new Row(this, "Home Assistant address", "For example http://192.168.1.10:8123", false,
 +                this::editUrl, null);
          url.setValue(config.url.isEmpty() ? "Not set" : config.url);
 -        Row token = add(new Row(this, "Access token", "Stored on this TV only.", false, this::editToken, null));
+-        token.setTag("connection:token");
 +        Row token = new Row(this, "Access token", "Stored on this TV only.", false, this::editToken, null);
          token.setValue(config.token.isEmpty() ? "Not set" : "Set");
 +        content.addView(url);
 +        content.addView(token);
  
--        View keep = focused >= 0 && focused < rows.getChildCount() ? rows.getChildAt(focused) : null;
+-        View keep = focusedKey == null ? null : rows.findViewWithTag(focusedKey);
+-        // Its entity gone: the row now in its place, as before.
+-        if (keep == null && focused >= 0 && focused < rows.getChildCount()) keep = rows.getChildAt(focused);
 -        if (keep != null && keep.isFocusable()) keep.requestFocus();
 +        Tile keep = focusedId == null ? null : tiles.get(focusedId);
 +        if (keep != null) keep.requestFocus();
@@ -706,7 +738,7 @@ index 038f200..32706d2 100644
      }
  
      private static int weatherDrawable(String icon) {
-@@ -230,12 +574,15 @@ public class MainActivity extends Activity {
+@@ -287,12 +624,15 @@ public class MainActivity extends Activity {
          }
      }
  
@@ -722,10 +754,10 @@ index 038f200..32706d2 100644
                          return;
                      }
                      Config.saveUrl(this, u);
-@@ -255,8 +602,11 @@ public class MainActivity extends Activity {
+@@ -311,8 +651,11 @@ public class MainActivity extends Activity {
+     private void reload() {
          config = Config.load(this);
-         problem = null;
-         entities = new ArrayList<>();
+         forget();
 +        people = new ArrayList<>();
 +        doorRang = null;
 +        layoutKey = "";
@@ -735,7 +767,7 @@ index 038f200..32706d2 100644
          if (config.complete()) main.post(refresh);
      }
  
-@@ -279,18 +629,26 @@ public class MainActivity extends Activity {
+@@ -335,18 +678,26 @@ public class MainActivity extends Activity {
          field.requestFocus();
      }
  

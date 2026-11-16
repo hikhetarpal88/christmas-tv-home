@@ -158,7 +158,7 @@ If you want the full treatment (removing the TV's ads and bloat, keeping the rem
 
 ### Already running CleanYourTV?
 
-This is built on CleanYourTV 3.0, and your copy of TV Home is signed with your own key, so the release APK won't install over it. If you're still on 3.0, build this repo with `./build.sh`, which signs with the same `~/.android` key your CleanYourTV build used. On 3.1 or newer that won't work, because Android won't put an older version over a newer one, even one you built yourself. Uninstall yours first (`adb uninstall com.gathin.tvhome`) and install this one straight after, since the TV may have no Home screen in between. The Smart Home add-on here is from 3.4; if yours is newer, uninstall it first too. Uninstalling clears TV Home's settings, and loading the Christmas theme replaces whatever theme you had, so push yours again after New Year's.
+This is built on CleanYourTV 3.5, the newest release when this came out. Your copy of TV Home is signed with your own key, so the release APK won't install over it. Build this repo with `./build.sh` instead: it signs with the same `~/.android` key your CleanYourTV build used, so it goes straight over yours and keeps your settings. If your CleanYourTV is newer than 3.5, Android won't put an older version over a newer one, so uninstall yours first (`adb uninstall com.gathin.tvhome`) and install this one straight after, since the TV may have no Home screen in between. Uninstalling clears TV Home's settings. The same goes for the Smart Home add-on. Loading the Christmas theme replaces whatever theme you had, so push yours again after New Year's.
 
 CleanYourTV 3.4 added a `christmas` theme of its own: a still wallpaper of a snowy night with Santa's sleigh. This is a separate thing, a season that changes every day. That takes launcher code, which is why it comes as its own build of TV Home.
 
@@ -193,7 +193,7 @@ It's only been tested on one TV so far. If you try it on something else, an issu
 
 You need git, curl and Docker. The first build takes about ten minutes while it downloads the Android SDK into a Docker volume; after that it's a couple of minutes. The APKs land in `dist/`, signed with the Android debug key in `~/.android`.
 
-`build.sh` clones CleanYourTV at the release each patch was written for (v3.0.0 for the launcher, v3.4.0 for the Smart Home add-on), checks the tag still points at the same commit and that Gradle's wrapper matches its published checksum, applies the patches and builds in a throwaway container.
+`build.sh` clones CleanYourTV at the release the patches were written for (v3.5.0). It checks that the tag still points at the same commit and that Gradle's wrapper matches its published checksum, then applies the patches, runs CleanYourTV's unit tests and builds in a throwaway container.
 
 | Patch | What it adds |
 |---|---|

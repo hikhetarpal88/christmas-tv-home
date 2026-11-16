@@ -84,7 +84,8 @@ That installs the add-on and hands it the file through a provider only adb can w
 |---|---|
 | `url`, `token` | your Home Assistant address (use the IP if `homeassistant.local` doesn't resolve on the TV) and the token |
 | `glance` | the weather entity for the header |
-| `exclude` | entity ids to leave out; `*` matches anything, so `light.*_segment_*` drops every segment light |
+| `exclude` | entity ids to leave out everywhere, the header included; `*` matches anything, so `light.*_segment_*` drops every segment light |
+| `show`, `hide`, `hide_unavailable` | CleanYourTV's own row filters ([its README](https://github.com/Gathin23/cleanyourtv/tree/main/addons/smart-home#choosing-the-rows)): only these rows, leave these out (a `*` only at the end), and leave out what's unavailable. They work alongside `exclude` |
 | `summary.doorbell` | the doorbell automation whose last run counts as the last ring |
 
 Press Home afterwards: TV Home asks once whether to show the add-on's card, and from then on a Smart Home tile opens the dashboard. The add-on's only permission is the internet one, and it only ever talks to the address you gave it.

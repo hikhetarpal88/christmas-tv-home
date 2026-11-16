@@ -1,9 +1,9 @@
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Config.java b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
-index c2330d3..8c723da 100644
+index 6a763c8..a22f7c9 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/Config.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/Config.java
-@@ -622,7 +622,9 @@ final class Config {
-         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
+@@ -717,7 +717,9 @@ final class Config {
+         Festival festival = json == null ? Festival.NONE : Festival.parse(festivalName(json),
                  string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""),
                  json.optJSONObject("festival_days"), json.optJSONArray("festival_decor"),
 -                json.optJSONArray("festival_fireworks"));
@@ -11,13 +11,13 @@ index c2330d3..8c723da 100644
 +                string(json, "festival_tree_from", ""), string(json, "festival_preview_date", ""),
 +                string(json, "festival_preview_moment", ""), string(json, "festival_replay", ""));
  
-         return new Config(dock, fillDock, hidden, libraryApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
-                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputUriScheme, Math.max(1, columns),
+         return new Config(dock, fillDock, hidden, libraryApps, libraryExcludedApps, liveTv, liveTvAction, liveTvInputId, packageMap(launchActions), packageMap(appLabels),
+                 packageMap(appBanners), panelService, panelAction, panelExtra, coocaaSources, inputAction, inputSources, inputUriScheme, Math.max(1, columns),
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
-index 7972555..84fc2f9 100644
+index 2dcc6c0..b0a3fc6 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
-@@ -43,13 +43,41 @@ final class Festival {
+@@ -50,13 +50,41 @@ final class Festival {
      final Set<String> decor;
      /** bravia: festival_fireworks, the nights with fireworks. */
      final Set<LocalDate> fireworks;
@@ -61,7 +61,7 @@ index 7972555..84fc2f9 100644
          this.name = name;
          this.until = until;
          this.greeting = greeting;
-@@ -57,6 +85,11 @@ final class Festival {
+@@ -64,6 +92,11 @@ final class Festival {
          this.days = days;
          this.decor = decor;
          this.fireworks = fireworks;
@@ -73,7 +73,7 @@ index 7972555..84fc2f9 100644
      }
  
      /**
-@@ -81,6 +114,16 @@ final class Festival {
+@@ -88,6 +121,16 @@ final class Festival {
      /** The same, with the bravia extras: festival_days, festival_decor and festival_fireworks (each may be null). */
      static Festival parse(String name, String until, String greeting, String accent, JSONObject days,
                            JSONArray decor, JSONArray fireworks) {
@@ -90,7 +90,7 @@ index 7972555..84fc2f9 100644
          Festival base = parse(name, until, greeting, accent);
          if (base == NONE) return NONE;
          Map<LocalDate, String> byDay = new HashMap<>();
-@@ -108,8 +151,53 @@ final class Festival {
+@@ -115,8 +158,53 @@ final class Festival {
                  // left out
              }
          }
@@ -3173,20 +3173,20 @@ index 0000000..d22594f
 +    }
 +}
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
-index 8572285..9619749 100644
+index 96718a6..2fde135 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/MainActivity.java
-@@ -364,6 +364,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -444,6 +444,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          public void run() {
              updateGreeting();
-             updateRace();
+             updatePanel();
 +            if (dateShort) updateWeather();   // bravia: try the full date again; fitDateLine shortens it if needed
 +            else root.post(MainActivity.this::fitDateLine);
-             // The pill follows the network callbacks and each return to Home; only the diya's flame follows the
+             // The pill follows the network callbacks and each return to Home; only the festive light follows the
              // signal level, so only it needs this minute's binder calls (about 7 ms on the UI thread).
              if (festive) updateWifiLabel();
-@@ -432,6 +434,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
-         ambientGlow = cfg.ambientGlow;
+@@ -529,6 +531,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         glowSnap = cfg.glowSnap;
          appGlow = cfg.appGlow;
          if (!ambientGlow) ambient.setVisibility(View.GONE);
 +        // bravia: a Christmas theme paints its own night sky; the focused app's coloured glow would fight it.
@@ -3197,21 +3197,15 @@ index 8572285..9619749 100644
          heroName = findViewById(R.id.heroName);
          hero = findViewById(R.id.hero);
          // The hero is now a group (name, and the cinematic lines): without this every fade of the default
-@@ -794,11 +801,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -935,6 +942,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          }
          if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
          if (festive && "diwali".equals(festival.name) && !festival.decor.isEmpty()) setUpDiwali();
 +        if (festive && "christmas".equals(festival.name) && !festival.decor.isEmpty()) setUpHoliday();
  
          // Hide the glass when focus leaves the tiles.
-         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
-             boolean onTile = newF != null && newF.getId() == R.id.card;
-             if (!onTile) hideGlass();
-+            if (holiday != null) holiday.onFocus(newF);
-         });
- 
-         packageFilter.addAction(Intent.ACTION_PACKAGE_ADDED);
-@@ -941,6 +950,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         // Taken off in onDestroy: recreate() keeps the window, and a listener left on it held every earlier Home.
+@@ -1116,6 +1124,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              recreate();
              return;
          }
@@ -3229,15 +3223,15 @@ index 8572285..9619749 100644
          restartIdleClock();
          promptsPaused = false;
          if (grid.getAdapter() == null) grid.setAdapter(adapter);   // dropped by onTrimMemory
-@@ -1142,6 +1162,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
-         super.onPause();
+@@ -1326,6 +1345,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         cancelHoldOk();
          getContentResolver().unregisterContentObserver(weatherObserver);
          if (diwali != null) diwali.stop();
 +        if (holiday != null) holiday.stop();
          root.removeCallbacks(weatherCheck);
          root.removeCallbacks(showIdleClock);
          endReorder();   // Home or another app while reordering keeps the order so far
-@@ -1195,6 +1216,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -1384,6 +1404,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      @Override
      public void onWindowFocusChanged(boolean hasFocus) {
          super.onWindowFocusChanged(hasFocus);
@@ -3256,33 +3250,42 @@ index 8572285..9619749 100644
          if (hasFocus) {
              startPendingSettingsReorder();
              if (libraryFocusPending && appLibrary == null) focusLibrary();
-@@ -1205,6 +1238,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -1397,6 +1429,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+     private final ViewTreeObserver.OnGlobalFocusChangeListener glassFocusListener = (oldF, newF) -> {
+         boolean onTile = newF != null && newF.getId() == R.id.card;
+         if (!onTile) hideGlass();
++        if (this.holiday != null) this.holiday.onFocus(newF);   // "this.": the field is declared further down
+     };
+ 
      @Override
-     protected void onDestroy() {
-         super.onDestroy();
+@@ -1407,6 +1440,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         RemoteKeys.release(this);
+         cancelHoldOk();
+         if (gameDay != null) gameDay.shutdown();
 +        if (holiday != null) holiday.release();
          unregisterReceiver(packageReceiver);
+         if (openOnStartOnWake) unregisterReceiver(wakeReceiver);
          wallpaperPlayer.close();
-         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
-@@ -1248,6 +1282,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -1454,6 +1488,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
       */
      @Override
      public boolean dispatchKeyEvent(KeyEvent event) {
 +        if (holiday != null && event.getAction() == KeyEvent.ACTION_DOWN) holiday.onUserKey();
-         if (handleSettingsKey(event)) return true;
-         if (tileMenuEnabled && !reordering && openPopup == null && cardPrompt == null
-                 && event.getKeyCode() == KeyEvent.KEYCODE_MENU) {
-@@ -1575,7 +1610,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
- 
+         if (homeIgnoreChannelKeys && RemoteKeys.isChannelKey(event.getKeyCode())) return true;
+         // Vendor keys (TCL Netflix button, 4062) never reach the key services, only the focused window, so their
+         // "hold:" entries run here too or nowhere. Only while resumed: onPause releases Home's holds, and a DOWN
+@@ -1793,8 +1828,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      @Override
+     @SuppressWarnings("deprecation")
      public void onBackPressed() {
--        // Home screen: Back goes nowhere.
-+        // Home screen: Back goes nowhere. bravia: at Christmas it shakes the snow globe.
-+        if (holiday != null) holiday.shake();
+-        // Home screen: Back goes nowhere, unless back_opens_clock is on.
++        // Home screen: Back goes nowhere, unless back_opens_clock is on. At Christmas it shakes the snow globe.
+         if (backOpensClock) startActivity(new Intent(this, ClockActivity.class));
++        else if (holiday != null) holiday.shake();
      }
  
      // ---- glass highlight -------------------------------------------------------------------------
-@@ -2469,9 +2505,51 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2772,9 +2808,51 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          }
          // TextClock formats pass quoted text through, so the weather rides along as a literal.
          String text = weatherText();
@@ -3334,7 +3337,7 @@ index 8572285..9619749 100644
      }
  
      private String weatherText() {
-@@ -2492,6 +2570,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2795,6 +2873,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
  
      /** bravia: the Diwali decorations, while a diwali festival with festival_decor is on. */
      private DiwaliDecor diwali;
@@ -3346,7 +3349,7 @@ index 8572285..9619749 100644
      private DockDecoration dockDecoration;
  
      private void setUpDiwali() {
-@@ -2538,6 +2621,42 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2841,6 +2924,42 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          diwali.placeKandil(cx);
      }
  
@@ -3389,7 +3392,7 @@ index 8572285..9619749 100644
      private int xInRoot(View v) {
          int[] a = new int[2], b = new int[2];
          v.getLocationInWindow(a);
-@@ -2592,7 +2711,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2895,7 +3014,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              else if (hour < 22) res = R.string.good_evening;
              else res = R.string.good_night;
          }
@@ -3399,7 +3402,7 @@ index 8572285..9619749 100644
          if (!festiveGreeting.isEmpty()) {
              greeting.setText(festiveGreeting);
              greeting.setTextColor(liftTowardsWhite(festival.accentColor(), 0.25f));
-@@ -2604,6 +2724,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -2907,6 +3027,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          if (shamsi) shamsiDate.setText(Shamsi.today(getResources()));
          if (lunar) lunarDate.setText(Lunar.today(getResources(), lunarOffset));
          if (diwali != null) placeDiwali();   // bravia: the date line's length changes with the weather text
@@ -3407,27 +3410,27 @@ index 8572285..9619749 100644
      }
  
      // ---- race-weekend panel (a theme's race_calendar) -----------------------------------------------
-@@ -2763,6 +2884,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+@@ -3148,6 +3269,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
              if (online && flame == 0) flame = 3;   // online some other way (cellular, USB tethering)
-             diya.setSteady(steady);
-             diya.setFlame(flame);
+             lamp.setSteady(steady);
+             lamp.setFlame(flame);
 +        } else if (festive && bauble != null) {
 +            bauble.setOnline(online);   // bravia: the Christmas bauble greys out while offline
          } else {
              if (icon != wifiIcon) {
                  wifiIcon = icon;
-@@ -2813,6 +2936,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
-      * network whose flame follows the connection, and a marigold for Settings that turns when focused.
+@@ -3202,6 +3325,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+      * Settings that floats up.
       */
      private void applyFestiveSkin(TextView inputs, TextView settings) {
 +        if ("christmas".equals(festival.name)) {
 +            applyChristmasSkin(inputs, settings);
 +            return;
 +        }
-         bell = new BellDrawable(density);
-         marigold = new MarigoldDrawable(density);
-         diya = new DiyaDrawable(density);
-@@ -2826,6 +2953,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
+         if (festival.isHalloween()) {
+             SpookyIconDrawable bat = new SpookyIconDrawable(getResources(), density, SpookyIconDrawable.BAT);
+             SpookyIconDrawable ghost = new SpookyIconDrawable(getResources(), density, SpookyIconDrawable.GHOST);
+@@ -3231,6 +3358,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
          addFocusAction(settings, marigold::turn);
      }
  

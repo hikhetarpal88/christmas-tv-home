@@ -1,8 +1,8 @@
 diff --git a/launcher/app/src/main/AndroidManifest.xml b/launcher/app/src/main/AndroidManifest.xml
-index 701b5fe..62feb44 100644
+index ca18afa..dd942f8 100644
 --- a/launcher/app/src/main/AndroidManifest.xml
 +++ b/launcher/app/src/main/AndroidManifest.xml
-@@ -245,5 +245,17 @@
+@@ -252,5 +252,17 @@
                  android:name="android.accessibilityservice"
                  android:resource="@xml/input_key_service" />
          </service>
@@ -21,10 +21,10 @@ index 701b5fe..62feb44 100644
      </application>
  </manifest>
 diff --git a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
-index 84fc2f9..e771c7a 100644
+index b0a3fc6..8934563 100644
 --- a/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
 +++ b/launcher/app/src/main/java/com/gathin/tvhome/Festival.java
-@@ -57,16 +57,20 @@ final class Festival {
+@@ -64,16 +64,20 @@ final class Festival {
       */
      final String signature;
  
@@ -49,7 +49,7 @@ index 84fc2f9..e771c7a 100644
          }
      }
  
-@@ -159,7 +163,7 @@ final class Festival {
+@@ -166,7 +170,7 @@ final class Festival {
                  if (o == null) continue;
                  try {
                      plan.put(LocalDate.parse(key.trim()), new Day(word(o, "moment"), word(o, "gnome"), word(o, "sky"),
@@ -58,7 +58,7 @@ index 84fc2f9..e771c7a 100644
                  } catch (DateTimeParseException ignored) {
                      // left out
                  }
-@@ -180,6 +184,12 @@ final class Festival {
+@@ -187,6 +191,12 @@ final class Festival {
          return s.length() <= 40 && s.matches("[a-z0-9:_.@+-]*") ? s : "";
      }
  
